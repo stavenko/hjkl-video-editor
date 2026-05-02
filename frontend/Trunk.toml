@@ -1,0 +1,13 @@
+[serve]
+port = 3502
+
+[watch]
+ignore = ["dist"]
+
+[[proxy]]
+rewrite = "/api/"
+backend = "http://127.0.0.1:3501/api/"
+
+[[proxy]]
+rewrite = "/config/"
+backend = "http://127.0.0.1:3501/config/"

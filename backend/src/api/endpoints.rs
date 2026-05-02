@@ -1,0 +1,15 @@
+pub mod asset_thumbnail;
+pub mod asset_waveform;
+pub mod config_frontend;
+pub mod node_create;
+pub mod node_delete;
+pub mod node_position;
+pub mod node_thumbnail;
+pub mod project_get;
+pub mod projects_create;
+pub mod projects_delete;
+pub mod projects_list;
+pub mod projects_rename;
+pub mod upload_begin;
+pub mod upload_chunk;
+pub mod upload_finalize;

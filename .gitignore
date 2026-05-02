@@ -1,0 +1,43 @@
+# Build artifacts
+target/
+**/*.rs.bk
+**/*.rs~
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cargo
+**/Cargo.lock
+
+# Frontend
+dist/
+
+# Local config / runtime data
+config.toml
+config/*-local.toml
+projects/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Test media
+*.MOV
+*.mp4
+
+# Logs
+*.log
+
+# Env
+.env
+.env.local

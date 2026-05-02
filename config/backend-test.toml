@@ -1,0 +1,11 @@
+addr = "127.0.0.1"
+port = 3599
+
+[storage]
+projects_root = "/tmp/hjkl-video-editor-test/projects"
+
+[ffmpeg]
+binary = "ffmpeg"
+
+[frontend]
+config_path = "/tmp/hjkl-video-editor-test/frontend.toml"

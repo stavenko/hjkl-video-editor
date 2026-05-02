@@ -1,0 +1,11 @@
+addr = "127.0.0.1"
+port = 3501
+
+[storage]
+projects_root = "./projects"
+
+[ffmpeg]
+binary = "ffmpeg"
+
+[frontend]
+config_path = "config/frontend-local.toml"
