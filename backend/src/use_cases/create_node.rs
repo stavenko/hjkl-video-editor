@@ -1,4 +1,4 @@
-use api_types::{CreateNodeInput, CreateNodeOutput};
+use api_types::{CreateNodeInput, CreateNodeOutput, NodeKind, NodeSettings};
 use uuid::Uuid;
 
 use crate::models::project::Node;
@@ -31,11 +31,17 @@ pub async fn command(
         return Err(ProjectStorageError::NotFound(input.project_id).into());
     }
     let mut graph = storage.read_graph(input.project_id).await?;
+    let settings = match input.kind {
+        NodeKind::Process(pk) => Some(NodeSettings::default_for(pk)),
+        _ => None,
+    };
     let node = Node {
         id: Uuid::new_v4(),
         kind: input.kind,
         position: input.position,
         asset: None,
+        output: None,
+        settings,
     };
     graph.nodes.push(node.clone());
     storage.write_graph(input.project_id, &graph).await?;

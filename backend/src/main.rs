@@ -8,7 +8,7 @@ use clap::Parser;
 use backend::api;
 use backend::api::endpoints::config_frontend::FrontendConfigPath;
 use backend::config::Config;
-use backend::providers::{Ffmpeg, ProjectStorage, UploadManager};
+use backend::providers::{Ffmpeg, ProjectStorage, TaskPool, UploadManager, WhisperProvider};
 
 #[derive(Parser, Debug)]
 #[command(name = "backend")]
@@ -51,10 +51,18 @@ async fn run_server(config_path: PathBuf) -> std::io::Result<()> {
             .expect("Failed to initialize project storage"),
     );
 
+    let ffmpeg = Ffmpeg::new(config.ffmpeg.binary.clone());
+    let whisper = Arc::new(
+        WhisperProvider::new(&config.whisper.model_path, &config.whisper.model_url, ffmpeg.clone())
+            .await
+            .expect("Failed to initialize whisper"),
+    );
+    let task_pool = Arc::new(TaskPool::new(project_storage.clone(), ffmpeg.clone(), whisper));
+
     let frontend_config_path = FrontendConfigPath(config.frontend.config_path.clone());
     let frontend_config_path_data = web::Data::new(frontend_config_path);
     let upload_manager_data = web::Data::new(UploadManager::new());
-    let ffmpeg_data = web::Data::new(Ffmpeg::new(config.ffmpeg.binary.clone()));
+    let ffmpeg_data = web::Data::new(ffmpeg);
 
     let bind_addr = config.addr.clone();
     let bind_port = config.port;
@@ -73,6 +81,7 @@ async fn run_server(config_path: PathBuf) -> std::io::Result<()> {
             .app_data(frontend_config_path_data.clone())
             .app_data(upload_manager_data.clone())
             .app_data(ffmpeg_data.clone())
+            .app_data(web::Data::new(task_pool.clone()))
             .configure(api::configure_routes)
     })
     .bind((bind_addr.as_str(), bind_port))?

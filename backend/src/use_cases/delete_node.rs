@@ -33,6 +33,7 @@ pub async fn command(
         return Err(Error::NodeNotFound(input.node_id));
     };
     let removed = graph.nodes.remove(idx);
+    // Remove asset files
     if let Some(asset) = &removed.asset {
         let file = storage.asset_file_path(input.project_id, asset);
         let thumb = storage.asset_thumbnail_path(input.project_id, asset.id);
@@ -45,6 +46,16 @@ pub async fn command(
             }
         }
     }
+    // Remove node output file
+    if let Some(output) = &removed.output {
+        let p = storage.assets_dir(input.project_id).join(&output.file_name);
+        let _ = fs::remove_file(&p).await;
+    }
+    // Remove all edges referencing this node
+    graph
+        .edges
+        .retain(|e| e.from_node != input.node_id && e.to_node != input.node_id);
+
     storage.write_graph(input.project_id, &graph).await?;
     Ok(DeleteNodeOutput {
         node_id: input.node_id,

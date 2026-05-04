@@ -43,7 +43,12 @@ pub async fn command(
     let Some(node) = graph.nodes.iter().find(|n| n.id == input.node_id) else {
         return Err(Error::NodeNotFound(input.node_id));
     };
-    let NodeKind::Input(node_input_kind) = node.kind;
+    let NodeKind::Input(node_input_kind) = node.kind else {
+        return Err(Error::KindMismatch {
+            actual: node.kind,
+            expected: input.kind,
+        });
+    };
     if node_input_kind != input.kind {
         return Err(Error::KindMismatch {
             actual: node.kind,

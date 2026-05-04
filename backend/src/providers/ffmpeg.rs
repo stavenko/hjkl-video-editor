@@ -161,6 +161,119 @@ impl Ffmpeg {
         Ok(output.stdout)
     }
 
+    pub async fn extract_audio(&self, input: &Path, output: &Path) -> Result<(), FfmpegError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-i")
+            .arg(input)
+            .arg("-vn")
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg("-ar")
+            .arg("44100")
+            .arg("-ac")
+            .arg("2")
+            .arg(output);
+        run(cmd, "extract_audio", input, output).await
+    }
+
+    pub async fn detect_silence(
+        &self,
+        input: &Path,
+        noise_db: f64,
+    ) -> Result<Vec<SilenceSegment>, FfmpegError> {
+        let filter = format!("silencedetect=noise={}dB:d=0.5", noise_db);
+        let output = Command::new(&self.binary)
+            .arg("-hide_banner")
+            .arg("-i")
+            .arg(input)
+            .arg("-af")
+            .arg(&filter)
+            .arg("-f")
+            .arg("null")
+            .arg("-")
+            .output()
+            .await
+            .map_err(|source| FfmpegError::Spawn {
+                op: "detect_silence",
+                source,
+            })?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut segments = Vec::new();
+        let mut current_start: Option<f64> = None;
+
+        for line in stderr.lines() {
+            if let Some(pos) = line.find("silence_start: ") {
+                let s = &line[pos + "silence_start: ".len()..];
+                if let Some(val) = s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok())
+                {
+                    current_start = Some(val);
+                }
+            }
+            if let Some(pos) = line.find("silence_end: ") {
+                let s = &line[pos + "silence_end: ".len()..];
+                if let Some(end) = s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok())
+                {
+                    if let Some(start) = current_start.take() {
+                        segments.push(SilenceSegment {
+                            start,
+                            end,
+                            duration: end - start,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(segments)
+    }
+
+    pub async fn trim_audio(
+        &self,
+        input: &Path,
+        output: &Path,
+        start_secs: f64,
+        duration_secs: f64,
+    ) -> Result<(), FfmpegError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-ss")
+            .arg(format!("{:.3}", start_secs))
+            .arg("-t")
+            .arg(format!("{:.3}", duration_secs))
+            .arg("-i")
+            .arg(input)
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg(output);
+        run(cmd, "trim_audio", input, output).await
+    }
+
+    pub async fn convert_to_16k_mono(&self, input: &Path, output: &Path) -> Result<(), FfmpegError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-i")
+            .arg(input)
+            .arg("-ar")
+            .arg("16000")
+            .arg("-ac")
+            .arg("1")
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg(output);
+        run(cmd, "convert_16k_mono", input, output).await
+    }
+
     pub async fn make_waveform(&self, input: &Path, output: &Path) -> Result<(), FfmpegError> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("-y")
@@ -199,6 +312,13 @@ async fn run(
         });
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SilenceSegment {
+    pub start: f64,
+    pub end: f64,
+    pub duration: f64,
 }
 
 #[derive(thiserror::Error, Debug)]

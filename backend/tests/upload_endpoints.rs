@@ -15,21 +15,18 @@ async fn setup_app(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
+    let tmp = tempfile::tempdir().unwrap();
+    let projects_root = tmp.path().join("projects");
+    std::fs::create_dir_all(&projects_root).unwrap();
+
+    let frontend_cfg_path = tmp.path().join("frontend.toml");
+    std::fs::write(&frontend_cfg_path, "api_base_url = \"\"").unwrap();
+
     let config = Config::from_file(std::path::Path::new("../config/backend-test.toml"))
         .expect("Failed to load test config");
 
-    // Clean up from previous runs
-    let _ = std::fs::remove_dir_all(&config.storage.projects_root);
-    std::fs::create_dir_all(&config.storage.projects_root).unwrap();
-
-    let frontend_cfg_path = config.frontend.config_path.clone();
-    if let Some(parent) = frontend_cfg_path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(&frontend_cfg_path, "api_base_url = \"\"").unwrap();
-
     let storage = Arc::new(
-        ProjectStorage::new(config.storage.projects_root.clone())
+        ProjectStorage::new(projects_root)
             .await
             .unwrap(),
     );

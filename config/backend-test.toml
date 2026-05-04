@@ -7,5 +7,8 @@ projects_root = "/tmp/hjkl-video-editor-test/projects"
 [ffmpeg]
 binary = "ffmpeg"
 
+[whisper]
+model_path = "models/ggml-base.bin"
+
 [frontend]
 config_path = "/tmp/hjkl-video-editor-test/frontend.toml"

@@ -1,8 +1,10 @@
 use api_types::{
-    CreateNodeInput, CreateNodeOutput, CreateProjectInput, CreateProjectOutput,
-    DeleteNodeInput, DeleteNodeOutput, DeleteProjectInput, DeleteProjectOutput,
+    ConnectNodesInput, ConnectNodesOutput, CreateNodeInput, CreateNodeOutput,
+    CreateProjectInput, CreateProjectOutput, DeleteNodeInput, DeleteNodeOutput,
+    DeleteProjectInput, DeleteProjectOutput, DisconnectNodesInput, DisconnectNodesOutput,
     GetProjectInput, GetProjectOutput, ListProjectsOutput, NodeKind, Position,
-    RenameProjectInput, RenameProjectOutput, UpdateNodePositionInput, UpdateNodePositionOutput,
+    RenameProjectInput, RenameProjectOutput, RunNodeInput, RunNodeOutput, TaskStatusInput,
+    TaskStatusOutput, UpdateNodePositionInput, UpdateNodePositionOutput,
 };
 use uuid::Uuid;
 
@@ -79,4 +81,62 @@ pub async fn update_node_position(
         },
     )
     .await
+}
+
+pub async fn connect_nodes(
+    project_id: Uuid,
+    from_node: Uuid,
+    from_port: String,
+    to_node: Uuid,
+    to_port: String,
+) -> Result<ConnectNodesOutput, ApiClientError> {
+    post(
+        "/api/nodes/connect",
+        &ConnectNodesInput {
+            project_id,
+            from_node,
+            from_port,
+            to_node,
+            to_port,
+        },
+    )
+    .await
+}
+
+pub async fn disconnect_nodes(
+    project_id: Uuid,
+    from_node: Uuid,
+    from_port: String,
+    to_node: Uuid,
+    to_port: String,
+) -> Result<DisconnectNodesOutput, ApiClientError> {
+    post(
+        "/api/nodes/disconnect",
+        &DisconnectNodesInput {
+            project_id,
+            from_node,
+            from_port,
+            to_node,
+            to_port,
+        },
+    )
+    .await
+}
+
+pub async fn run_node(
+    project_id: Uuid,
+    node_id: Uuid,
+) -> Result<RunNodeOutput, ApiClientError> {
+    post(
+        "/api/nodes/run",
+        &RunNodeInput {
+            project_id,
+            node_id,
+        },
+    )
+    .await
+}
+
+pub async fn get_task_status(task_id: Uuid) -> Result<TaskStatusOutput, ApiClientError> {
+    post("/api/nodes/task-status", &TaskStatusInput { task_id }).await
 }

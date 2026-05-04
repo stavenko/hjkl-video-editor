@@ -66,6 +66,16 @@ impl ProjectStorage {
             .join(format!("{asset_id}.wave.png"))
     }
 
+    pub fn node_output_path(&self, project_id: Uuid, node_id: Uuid, extension: &str) -> PathBuf {
+        self.assets_dir(project_id)
+            .join(format!("{node_id}.output.{extension}"))
+    }
+
+    pub fn node_output_waveform_path(&self, project_id: Uuid, node_id: Uuid) -> PathBuf {
+        self.assets_dir(project_id)
+            .join(format!("{node_id}.output.wave.png"))
+    }
+
     pub async fn list(&self) -> Result<Vec<ProjectMetadata>, ProjectStorageError> {
         let mut entries =
             fs::read_dir(&self.root)

@@ -8,6 +8,7 @@ pub struct Config {
     pub port: u16,
     pub storage: StorageConfig,
     pub ffmpeg: FfmpegConfig,
+    pub whisper: WhisperConfig,
     pub frontend: FrontendConfig,
 }
 
@@ -19,6 +20,17 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FfmpegConfig {
     pub binary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhisperConfig {
+    pub model_path: String,
+    #[serde(default = "default_whisper_model_url")]
+    pub model_url: String,
+}
+
+fn default_whisper_model_url() -> String {
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

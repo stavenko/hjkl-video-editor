@@ -1,10 +1,14 @@
+pub mod connect_nodes;
 pub mod create_node;
 pub mod create_project;
 pub mod delete_node;
 pub mod delete_project;
+pub mod disconnect_nodes;
 pub mod get_project;
 pub mod list_projects;
 pub mod rename_project;
+pub mod run_node;
+pub mod task_status;
 pub mod update_node_position;
 pub mod upload_begin;
 pub mod upload_finalize;
