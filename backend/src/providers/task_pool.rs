@@ -190,6 +190,19 @@ async fn process_node(
     };
     let output_path = storage.node_output_path(req.project_id, req.node_id, output_ext);
 
+    // Clean up old loop clips for this node
+    let loop_prefix = format!("{}.loop_", req.node_id);
+    let assets_dir = storage.assets_dir(req.project_id);
+    if let Ok(mut entries) = tokio::fs::read_dir(&assets_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&loop_prefix) {
+                    let _ = tokio::fs::remove_file(entry.path()).await;
+                }
+            }
+        }
+    }
+
     match process_kind {
         ProcessNodeKind::ExtractAudio => {
             ffmpeg

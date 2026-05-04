@@ -6,6 +6,7 @@ pub mod disconnect_nodes;
 pub mod node_create;
 pub mod node_delete;
 pub mod node_file;
+pub mod node_loop_clip;
 pub mod node_position;
 pub mod node_thumbnail;
 pub mod project_get;

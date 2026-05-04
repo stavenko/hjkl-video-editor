@@ -598,6 +598,19 @@ main.editor-main {
 }
 .waveform-wrap .media-waveform { display: block; }
 
+.waveform-wrap { cursor: crosshair; }
+.waveform-wrap img { pointer-events: none; }
+
+.selection-highlight {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(77, 171, 247, 0.25);
+    border-left: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+    pointer-events: none;
+}
+
 .playhead {
     position: absolute;
     top: 0;
@@ -608,6 +621,22 @@ main.editor-main {
     transform: translateX(-1px);
     transition: left 0.05s linear;
 }
+
+.audio-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.clear-sel-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+.clear-sel-btn:hover { color: var(--danger); }
 
 /* JSON output */
 .json-output { text-align: center; }

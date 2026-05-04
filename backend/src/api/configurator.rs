@@ -2,7 +2,7 @@ use actix_web::web;
 
 use crate::api::endpoints::{
     asset_thumbnail, asset_waveform, config_frontend, connect_nodes, disconnect_nodes, node_create,
-    node_delete, node_file, node_position, node_thumbnail, project_get, projects_create,
+    node_delete, node_file, node_loop_clip, node_position, node_thumbnail, project_get, projects_create,
     projects_delete, projects_list, projects_rename, run_node, task_status, upload_begin,
     upload_chunk, upload_finalize,
 };
@@ -26,6 +26,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route(
                 "/{project_id}/nodes/{node_type}/{node_id}/file",
                 web::get().to(node_file::handler),
+            )
+            .route(
+                "/{project_id}/nodes/{node_type}/{node_id}/loop-clip",
+                web::get().to(node_loop_clip::handler),
             )
             .route(
                 "/{project_id}/assets/{asset_id}/thumbnail",

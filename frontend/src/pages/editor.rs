@@ -711,8 +711,12 @@ fn NodeView(
                                             "/api/projects/{}/nodes/{}/{}/file?v={}",
                                             project_id, slug, n.id, cache_bust
                                         ));
+                                        let loop_base = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/loop-clip?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
                                         view! {
-                                            <AudioPlayer wave_url=wave_url file_url=file_src />
+                                            <AudioPlayer wave_url=wave_url file_url=file_src loop_clip_base=loop_base />
                                         }.into_view()
                                     }
                                     ProcessNodeKind::DetectSilence | ProcessNodeKind::DetectSubtitles | ProcessNodeKind::SpeechBounds => {
@@ -987,8 +991,12 @@ fn AssetView(
         InputNodeKind::Audio => {
             let wave_url = thumbnail_url(project_id, node_id, kind);
             let audio_src = file_url(project_id, node_id, kind);
+            let slug = kind.url_slug();
+            let loop_base = absolute_url(&format!(
+                "/api/projects/{project_id}/nodes/{slug}/{node_id}/loop-clip?v=0"
+            ));
             view! {
-                <AudioPlayer wave_url=wave_url file_url=audio_src />
+                <AudioPlayer wave_url=wave_url file_url=audio_src loop_clip_base=loop_base />
                 <div class="meta-row">
                     <span>{original}</span>
                     <span>{size}</span>
@@ -1021,20 +1029,111 @@ fn VideoPlayerModal(
 }
 
 #[component]
-fn AudioPlayer(wave_url: String, file_url: String) -> impl IntoView {
+fn AudioPlayer(
+    wave_url: String,
+    file_url: String,
+    loop_clip_base: String,
+) -> impl IntoView {
     let playing = create_rw_signal(false);
     let playhead_pct = create_rw_signal(0.0_f64);
     let audio_ref = create_node_ref::<html::Audio>();
 
-    let toggle = move |_| {
-        let Some(audio) = audio_ref.get_untracked() else { return };
-        let el: &web_sys::HtmlMediaElement = audio.unchecked_ref();
+    // Selection: (start_pct, end_pct) in 0..1
+    let selection = create_rw_signal::<Option<(f64, f64)>>(None);
+    let selecting_from = create_rw_signal::<Option<f64>>(None);
+
+    let on_wave_mousedown = move |ev: MouseEvent| {
+        ev.prevent_default();
+        let target = ev.target().unwrap();
+        let el = target.unchecked_ref::<web_sys::HtmlElement>();
+        let rect = el.get_bounding_client_rect();
+        let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        selecting_from.set(Some(pct));
+        selection.set(None);
+        // Stop playback on new selection
         if playing.get_untracked() {
-            el.pause().ok();
-            playing.set(false);
-        } else {
-            el.play().ok();
+            if let Some(audio) = audio_ref.get_untracked() {
+                let el: &web_sys::HtmlMediaElement = audio.unchecked_ref();
+                el.pause().ok();
+                playing.set(false);
+            }
+        }
+    };
+
+    let on_wave_mousemove = move |ev: MouseEvent| {
+        let Some(start) = selecting_from.get_untracked() else { return };
+        let target = ev.target().unwrap();
+        let el = target.unchecked_ref::<web_sys::HtmlElement>();
+        let rect = el.get_bounding_client_rect();
+        let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let (a, b) = if pct < start { (pct, start) } else { (start, pct) };
+        if (b - a) > 0.01 {
+            selection.set(Some((a, b)));
+        }
+    };
+
+    let on_wave_mouseup = move |_ev: MouseEvent| {
+        selecting_from.set(None);
+    };
+
+    let toggle = {
+        let file_url = file_url.clone();
+        let loop_clip_base = loop_clip_base.clone();
+        move |_| {
+            let Some(audio) = audio_ref.get_untracked() else { return };
+            let el: web_sys::HtmlMediaElement = audio.unchecked_ref::<web_sys::HtmlMediaElement>().clone();
+            if playing.get_untracked() {
+                el.pause().ok();
+                playing.set(false);
+                return;
+            }
+            let needs_new_src = if let Some((a, b)) = selection.get_untracked() {
+                let clip_url = format!(
+                    "{}&start={:.4}&end={:.4}",
+                    loop_clip_base, a, b
+                );
+                el.set_src(&clip_url);
+                el.set_loop(true);
+                true
+            } else {
+                let full = &file_url;
+                if !el.src().ends_with(full.split('?').next().unwrap_or(full)) {
+                    el.set_src(full);
+                    el.set_loop(false);
+                    true
+                } else {
+                    el.set_current_time(0.0);
+                    false
+                }
+            };
             playing.set(true);
+            if needs_new_src {
+                // Wait for the new source to load, then play
+                spawn_local(async move {
+                    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                        let el2 = el.clone();
+                        let cb = wasm_bindgen::closure::Closure::once(move || {
+                            el2.set_oncanplaythrough(None);
+                            resolve.call0(&wasm_bindgen::JsValue::NULL).ok();
+                        });
+                        el.set_oncanplaythrough(Some(cb.as_ref().unchecked_ref()));
+                        cb.forget();
+                    });
+                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+                    let audio2 = audio_ref.get_untracked();
+                    if let Some(a) = audio2 {
+                        let m: &web_sys::HtmlMediaElement = a.unchecked_ref();
+                        let _ = wasm_bindgen_futures::JsFuture::from(
+                            m.play().unwrap()
+                        ).await;
+                    }
+                });
+            } else {
+                let play_promise = el.play().unwrap();
+                spawn_local(async move {
+                    let _ = wasm_bindgen_futures::JsFuture::from(play_promise).await;
+                });
+            }
         }
     };
 
@@ -1044,7 +1143,13 @@ fn AudioPlayer(wave_url: String, file_url: String) -> impl IntoView {
         let dur = el.duration();
         let cur = el.current_time();
         if dur.is_finite() && dur > 0.0 {
-            playhead_pct.set(cur / dur * 100.0);
+            if let Some((a, b)) = selection.get_untracked() {
+                // Map clip time to selection position
+                let sel_pct = a + (cur / dur) * (b - a);
+                playhead_pct.set(sel_pct * 100.0);
+            } else {
+                playhead_pct.set(cur / dur * 100.0);
+            }
         }
     };
 
@@ -1053,31 +1158,63 @@ fn AudioPlayer(wave_url: String, file_url: String) -> impl IntoView {
         playhead_pct.set(0.0);
     };
 
+    let clear_selection = move |ev: MouseEvent| {
+        ev.stop_propagation();
+        selection.set(None);
+        if playing.get_untracked() {
+            if let Some(audio) = audio_ref.get_untracked() {
+                let el: &web_sys::HtmlMediaElement = audio.unchecked_ref();
+                el.pause().ok();
+                playing.set(false);
+            }
+        }
+    };
+
     view! {
         <div class="audio-player" class:playing=move || playing.get()>
-            <div class="waveform-wrap">
-                <img class="media-waveform" src=wave_url/>
+            <div
+                class="waveform-wrap"
+                on:mousedown=on_wave_mousedown
+                on:mousemove=on_wave_mousemove
+                on:mouseup=on_wave_mouseup
+                on:mouseleave=move |_| selecting_from.set(None)
+            >
+                <img class="media-waveform" src=wave_url draggable="false"/>
+                {move || selection.get().map(|(a, b)| {
+                    let left = format!("{:.2}%", a * 100.0);
+                    let width = format!("{:.2}%", (b - a) * 100.0);
+                    view! {
+                        <div class="selection-highlight" style:left=left style:width=width></div>
+                    }
+                })}
                 <div
                     class="playhead"
                     style=move || format!("left: {:.2}%;", playhead_pct.get())
                 ></div>
             </div>
-            <button class="play-btn-inline" on:click=toggle>
-                {move || if playing.get() {
-                    view! {
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-                            <rect x="6" y="4" width="4" height="16"/>
-                            <rect x="14" y="4" width="4" height="16"/>
-                        </svg>
-                    }.into_view()
-                } else {
-                    view! {
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-                            <polygon points="6,3 20,12 6,21"/>
-                        </svg>
-                    }.into_view()
-                }}
-            </button>
+            <div class="audio-controls">
+                <button class="play-btn-inline" on:click=toggle>
+                    {move || if playing.get() {
+                        view! {
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                                <rect x="6" y="4" width="4" height="16"/>
+                                <rect x="14" y="4" width="4" height="16"/>
+                            </svg>
+                        }.into_view()
+                    } else {
+                        view! {
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                                <polygon points="6,3 20,12 6,21"/>
+                            </svg>
+                        }.into_view()
+                    }}
+                </button>
+                {move || selection.get().map(|_| view! {
+                    <button class="clear-sel-btn" on:click=clear_selection title="Снять выделение">
+                        "✕"
+                    </button>
+                })}
+            </div>
             <audio
                 node_ref=audio_ref
                 src=file_url
