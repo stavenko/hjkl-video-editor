@@ -1,5 +1,7 @@
 pub mod audio_analysis;
+pub mod compositor;
 pub mod ffmpeg;
+pub mod spline;
 pub mod project_storage;
 pub mod task_pool;
 pub mod upload_manager;

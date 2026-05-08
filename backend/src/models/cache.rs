@@ -1,4 +1,4 @@
-use api_types::NodeKind;
+use api_types::{NodeKind, ProcessNodeKind};
 use uuid::Uuid;
 
 use super::project::{Graph, Node};
@@ -10,6 +10,17 @@ pub fn expected_cache_key(node: &Node, graph: &Graph) -> Option<String> {
         return None;
     };
 
+    let settings_fp = node
+        .settings
+        .as_ref()
+        .map(|s| s.cache_fingerprint())
+        .unwrap_or_else(|| format!("{:?}", pk));
+
+    // Nodes without inputs (Scalar, Spline): cache key = settings only
+    if !pk.has_inputs() {
+        return Some(settings_fp);
+    }
+
     let input_edges: Vec<_> = graph.edges.iter().filter(|e| e.to_node == node.id).collect();
     if input_edges.is_empty() {
         return None;
@@ -17,7 +28,7 @@ pub fn expected_cache_key(node: &Node, graph: &Graph) -> Option<String> {
 
     let primary_edge = input_edges
         .iter()
-        .find(|e| e.to_port.is_empty() || e.to_port == "audio")
+        .find(|e| e.to_port.is_empty() || e.to_port == "audio" || e.to_port == "video" || e.to_port == "media")
         .or(input_edges.first())?;
 
     let primary_upstream = graph.nodes.iter().find(|n| n.id == primary_edge.from_node)?;
@@ -37,21 +48,26 @@ pub fn expected_cache_key(node: &Node, graph: &Graph) -> Option<String> {
         }
     }
 
-    let settings_fp = node
-        .settings
-        .as_ref()
-        .map(|s| s.cache_fingerprint())
-        .unwrap_or_else(|| format!("{:?}", pk));
     cache_parts.push(settings_fp);
-
     Some(cache_parts.join(":"))
 }
 
 /// Returns true if this process node needs to be (re)computed.
 pub fn needs_update(node: &Node, graph: &Graph) -> bool {
-    let NodeKind::Process(_) = node.kind else {
+    let NodeKind::Process(pk) = node.kind else {
         return false;
     };
+
+    // Nodes without inputs: just check settings vs cached output
+    if !pk.has_inputs() {
+        let Some(expected) = expected_cache_key(node, graph) else {
+            return true;
+        };
+        return match &node.output {
+            None => true,
+            Some(out) => out.cache_key != expected,
+        };
+    }
 
     let input_edges: Vec<_> = graph.edges.iter().filter(|e| e.to_node == node.id).collect();
     if input_edges.is_empty() {
@@ -68,7 +84,7 @@ pub fn needs_update(node: &Node, graph: &Graph) -> bool {
     }
 
     let Some(expected) = expected_cache_key(node, graph) else {
-        return true; // can't compute key → missing inputs
+        return true;
     };
 
     match &node.output {

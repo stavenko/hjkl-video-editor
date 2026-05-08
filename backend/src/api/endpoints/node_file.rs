@@ -38,6 +38,10 @@ pub async fn handler(
             };
             storage.asset_file_path(params.project_id, asset)
         }
+        NodeKind::Process(api_types::ProcessNodeKind::Clip) => {
+            // Serve preview video, not the JSON descriptor
+            storage.node_output_path(params.project_id, params.node_id, "preview.mp4")
+        }
         NodeKind::Process(_) => {
             let Some(output) = &node.output else {
                 return Err(actix_web::error::ErrorNotFound("Node has no output"));

@@ -40,7 +40,13 @@ pub async fn command(
         kind: input.kind,
         position: input.position,
         asset: None,
+        assets: Vec::new(),
         output: None,
+        subgraph: if matches!(input.kind, NodeKind::Process(api_types::ProcessNodeKind::Map)) {
+            Some(Box::new(crate::models::project::Graph::default()))
+        } else {
+            None
+        },
         settings,
     };
     graph.nodes.push(node.clone());

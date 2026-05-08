@@ -40,13 +40,28 @@ pub fn EditorPage() -> impl IntoView {
     let connecting_from = create_rw_signal::<Option<Uuid>>(None);
     let connect_mouse = create_rw_signal::<Option<(f32, f32)>>(None);
     let json_modal = create_rw_signal::<Option<(String, &'static str)>>(None);
+    let placing_kind = create_rw_signal::<Option<NodeKind>>(None);
+    let node_list_open = create_rw_signal(false);
+    let placing_pos = create_rw_signal::<Option<(f32, f32)>>(None);
     let drag_state = create_rw_signal::<Option<DragState>>(None);
     let drag_pos = create_rw_signal::<Option<(Uuid, Position)>>(None);
     let canvas_ref = create_node_ref::<html::Div>();
-    let cam = create_rw_signal(CanvasTransform {
-        offset_x: 0.0,
-        offset_y: 0.0,
-        scale: 1.0,
+    let cam = create_rw_signal({
+        let key = project_id.get_untracked()
+            .map(|id| format!("cam_{id}"))
+            .unwrap_or_default();
+        load_cam(&key).unwrap_or(CanvasTransform { offset_x: 0.0, offset_y: 0.0, scale: 1.0 })
+    });
+
+    // Persist cam on change (debounced via effect)
+    create_effect(move |_| {
+        let t = cam.get();
+        let Some(id) = project_id.get() else { return };
+        let key = format!("cam_{id}");
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let val = format!("{},{},{}", t.offset_x, t.offset_y, t.scale);
+            let _ = storage.set_item(&key, &val);
+        }
     });
 
     let reload = move || {
@@ -73,10 +88,17 @@ pub fn EditorPage() -> impl IntoView {
 
     let on_create_node = move |kind: NodeKind| {
         add_modal_open.set(false);
-        let Some(pid) = project_id.get_untracked() else {
-            return;
-        };
-        let position = next_position(&nodes.get_untracked());
+        placing_kind.set(Some(kind));
+        placing_pos.set(None);
+    };
+
+    let confirm_placement = move || {
+        let Some(kind) = placing_kind.get_untracked() else { return };
+        let Some((cx, cy)) = placing_pos.get_untracked() else { return };
+        let Some(pid) = project_id.get_untracked() else { return };
+        placing_kind.set(None);
+        placing_pos.set(None);
+        let position = Position { x: cx, y: cy };
         spawn_local(async move {
             match project_service::create_node(pid, kind, position).await {
                 Ok(out) => {
@@ -87,6 +109,41 @@ pub fn EditorPage() -> impl IntoView {
             }
         });
     };
+
+    let cancel_placement = move || {
+        placing_kind.set(None);
+        placing_pos.set(None);
+    };
+
+    // Esc cancels placement
+    create_effect(move |_| {
+        let cb = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+            if ev.key() == "Escape" && placing_kind.get_untracked().is_some() {
+                cancel_placement();
+            }
+        });
+        leptos::document()
+            .add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    });
+
+    // Prevent browser zoom (Ctrl+wheel / pinch) — must be non-passive
+    create_effect(move |_| {
+        let cb = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::WheelEvent)>::new(move |ev: web_sys::WheelEvent| {
+            if ev.ctrl_key() {
+                ev.prevent_default();
+            }
+        });
+        let opts = web_sys::AddEventListenerOptions::new();
+        opts.set_passive(false);
+        leptos::document()
+            .add_event_listener_with_callback_and_add_event_listener_options(
+                "wheel", cb.as_ref().unchecked_ref(), &opts
+            )
+            .ok();
+        cb.forget();
+    });
 
     let on_delete_node = move |node_id: Uuid| {
         let Some(pid) = project_id.get_untracked() else {
@@ -165,6 +222,11 @@ pub fn EditorPage() -> impl IntoView {
     };
 
     let on_canvas_mouse_move = move |ev: MouseEvent| {
+        if placing_kind.get_untracked().is_some() {
+            let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
+            placing_pos.set(Some((cx, cy)));
+            return;
+        }
         if connecting_from.get_untracked().is_some() {
             let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
             connect_mouse.set(Some((cx, cy)));
@@ -182,6 +244,10 @@ pub fn EditorPage() -> impl IntoView {
     };
 
     let on_mouse_up = move |_ev: MouseEvent| {
+        if placing_kind.get_untracked().is_some() {
+            confirm_placement();
+            return;
+        }
         if connecting_from.get_untracked().is_some() {
             connecting_from.set(None);
             connect_mouse.set(None);
@@ -223,6 +289,7 @@ pub fn EditorPage() -> impl IntoView {
 
     view! {
         <div style="position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg);">
+
             <div class="editor-toolbar">
                 <A href="/" attr:class="back">"← Проекты"</A>
                 <div class="title">
@@ -230,6 +297,9 @@ pub fn EditorPage() -> impl IntoView {
                 </div>
                 <button on:click=move |_| add_modal_open.set(true)>
                     "Добавить ноду"
+                </button>
+                <button on:click=move |_| node_list_open.set(true)>
+                    "Список нод"
                 </button>
             </div>
 
@@ -243,6 +313,50 @@ pub fn EditorPage() -> impl IntoView {
                 on:mousemove=on_canvas_mouse_move
                 on:mouseup=on_mouse_up
                 on:mouseleave=on_mouse_up
+                on:dragover=move |ev: web_sys::DragEvent| {
+                    ev.prevent_default();
+                }
+                on:drop=move |ev: web_sys::DragEvent| {
+                    ev.prevent_default();
+                    let Some(dt) = ev.data_transfer() else { return };
+                    let Some(files) = dt.files() else { return };
+                    let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
+                    let mut drop_items: Vec<(InputNodeKind, web_sys::File, Position)> = Vec::new();
+                    for i in 0..files.length() {
+                        let Some(file) = files.item(i) else { continue };
+                        let mime = file.type_();
+                        let name = file.name().to_lowercase();
+                        let kind = if mime.starts_with("video/") || name.ends_with(".mov") || name.ends_with(".mp4") || name.ends_with(".avi") || name.ends_with(".mkv") {
+                            InputNodeKind::Video
+                        } else if mime.starts_with("audio/") || name.ends_with(".mp3") || name.ends_with(".wav") || name.ends_with(".aac") || name.ends_with(".ogg") {
+                            InputNodeKind::Audio
+                        } else if mime.starts_with("image/") || name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".webp") {
+                            InputNodeKind::Image
+                        } else {
+                            continue;
+                        };
+                        let pos = Position { x: cx, y: cy + i as f32 * 300.0 };
+                        drop_items.push((kind, file, pos));
+                    }
+                    if !drop_items.is_empty() {
+                        let Some(pid) = project_id.get_untracked() else { return };
+                        spawn_local(async move {
+                            for (kind, file, pos) in drop_items {
+                                let node_kind = NodeKind::Input(kind);
+                                match project_service::create_node(pid, node_kind, pos).await {
+                                    Ok(out) => {
+                                        let node_id = out.node.id;
+                                        if let Err(e) = upload_service::upload_file(pid, node_id, kind, file, |_| {}).await {
+                                            error.set(Some(e.to_string()));
+                                        }
+                                    }
+                                    Err(e) => { error.set(Some(e.to_string())); break; }
+                                }
+                            }
+                            reload();
+                        });
+                    }
+                }
                 on:wheel=move |ev: WheelEvent| {
                     ev.prevent_default();
                     let Some(canvas) = canvas_ref.get_untracked() else { return };
@@ -354,6 +468,22 @@ pub fn EditorPage() -> impl IntoView {
                         }
                     }
                 />
+
+                {move || {
+                    let kind = placing_kind.get()?;
+                    let (cx, cy) = placing_pos.get()?;
+                    let label = kind_label(kind);
+                    Some(view! {
+                        <div
+                            class="node ghost"
+                            style=format!("left: {}px; top: {}px;", cx, cy)
+                        >
+                            <div class="node-header">
+                                <span class="node-kind-badge">{label}</span>
+                            </div>
+                        </div>
+                    })
+                }}
                 </div>
             </div>
 
@@ -373,6 +503,26 @@ pub fn EditorPage() -> impl IntoView {
 
             {move || json_modal.get().map(|(url, label)| view! {
                 <JsonModal url=url label=label on_close=move || json_modal.set(None) />
+            })}
+
+            {move || node_list_open.get().then(|| {
+                let on_del = move |ids: Vec<Uuid>| {
+                    let Some(pid) = project_id.get_untracked() else { return };
+                    spawn_local(async move {
+                        for id in ids {
+                            let _ = project_service::delete_node(pid, id).await;
+                        }
+                        reload();
+                    });
+                    node_list_open.set(false);
+                };
+                view! {
+                    <NodeListModal
+                        nodes=nodes
+                        on_delete=on_del
+                        on_close=move || node_list_open.set(false)
+                    />
+                }
             })}
         </div>
     }
@@ -401,6 +551,10 @@ fn AddNodeModal(
                         class:active=move || active_tab.get() == 1
                         on:click=move |_| active_tab.set(1)
                     >"Обработка"</button>
+                    <button
+                        class:active=move || active_tab.get() == 2
+                        on:click=move |_| active_tab.set(2)
+                    >"Композиция"</button>
                 </div>
                 <div class="modal-body">
                     <Show when=move || active_tab.get() == 0>
@@ -416,6 +570,34 @@ fn AddNodeModal(
                             <button class="node-type-card" on:click=move |_| on_select(NodeKind::Input(InputNodeKind::Image))>
                                 <div class="node-type-icon">"🖼"</div>
                                 <div class="node-type-label">"Изображение"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Input(InputNodeKind::VideoArray))>
+                                <div class="node-type-icon">"📁"</div>
+                                <div class="node-type-label">"Видео (массив)"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Scalar))>
+                                <div class="node-type-icon">"🔢"</div>
+                                <div class="node-type-label">"Число"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Spline))>
+                                <div class="node-type-icon">"📈"</div>
+                                <div class="node-type-label">"Сплайн"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::MathAdd))>
+                                <div class="node-type-icon">"+"</div>
+                                <div class="node-type-label">"A + B"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::MathSubtract))>
+                                <div class="node-type-icon">"-"</div>
+                                <div class="node-type-label">"A - B"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::MathMultiply))>
+                                <div class="node-type-icon">"×"</div>
+                                <div class="node-type-label">"A × B"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::MathDivide))>
+                                <div class="node-type-icon">"÷"</div>
+                                <div class="node-type-label">"A ÷ B"</div>
                             </button>
                         </div>
                     </Show>
@@ -433,6 +615,18 @@ fn AddNodeModal(
                                 <div class="node-type-icon">"💬"</div>
                                 <div class="node-type-label">"Субтитры"</div>
                             </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Map))>
+                                <div class="node-type-icon">"🔄"</div>
+                                <div class="node-type-label">"Map"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Reduce))>
+                                <div class="node-type-icon">"📊"</div>
+                                <div class="node-type-label">"Reduce"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::TrimVideo))>
+                                <div class="node-type-icon">"✂️"</div>
+                                <div class="node-type-label">"Обрезка видео"</div>
+                            </button>
                             <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::SpeechBounds))>
                                 <div class="node-type-icon">"📐"</div>
                                 <div class="node-type-label">"Края речи"</div>
@@ -440,6 +634,18 @@ fn AddNodeModal(
                             <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::TrimAudio))>
                                 <div class="node-type-icon">"✂️"</div>
                                 <div class="node-type-label">"Обрезка аудио"</div>
+                            </button>
+                        </div>
+                    </Show>
+                    <Show when=move || active_tab.get() == 2>
+                        <div class="node-type-grid">
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Clip))>
+                                <div class="node-type-icon">"🎞"</div>
+                                <div class="node-type-label">"Клип"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Mux))>
+                                <div class="node-type-icon">"🎬"</div>
+                                <div class="node-type-label">"Композитор"</div>
                             </button>
                         </div>
                     </Show>
@@ -520,9 +726,27 @@ fn NodeView(
     let id_for_drag = node_signal.with_untracked(|n| n.id);
 
     let is_process = matches!(node_signal.get_untracked().kind, NodeKind::Process(_));
-    let has_input_edge = Signal::derive(move || {
-        edges.get().iter().any(|e| e.to_node == id_for_drag)
+    let has_multi_inputs = {
+        let n = node_signal.get_untracked();
+        if let NodeKind::Process(pk) = n.kind {
+            pk.input_ports_with_settings(n.settings.as_ref()).len() > 1
+        } else { false }
+    };
+    let has_multi_outputs = {
+        let n = node_signal.get_untracked();
+        n.kind.output_ports().len() > 1
+    };
+    let missing_ports = Signal::derive(move || {
+        let n = node_signal.get();
+        let NodeKind::Process(pk) = n.kind else { return vec![] };
+        let required = pk.required_input_ports();
+        let connected: Vec<String> = edges.get().iter()
+            .filter(|e| e.to_node == id_for_drag)
+            .map(|e| e.to_port.clone())
+            .collect();
+        required.into_iter().filter(|p| !connected.contains(p)).collect::<Vec<_>>()
     });
+    let all_required_connected = Signal::derive(move || missing_ports.get().is_empty());
 
     let on_run = move || {
         spawn_local(async move {
@@ -539,7 +763,12 @@ fn NodeView(
 
     view! {
         <div
-            class=move || if is_process { "node process" } else { "node" }
+            class=move || {
+                let mut cls = if is_process { "node process".to_string() } else { "node".to_string() };
+                if has_multi_inputs { cls.push_str(" multi-inputs"); }
+                if has_multi_outputs { cls.push_str(" multi-outputs"); }
+                cls
+            }
             style=move || {
                 let pos = drag_pos
                     .get()
@@ -552,7 +781,10 @@ fn NodeView(
             {is_process.then(move || {
                 let n = node_signal.get_untracked();
                 let NodeKind::Process(pk) = n.kind else { return ().into_view() };
-                let ports = pk.input_ports();
+                let ports = pk.input_ports_with_settings(n.settings.as_ref());
+                if ports.is_empty() {
+                    return ().into_view();
+                }
                 if ports.len() <= 1 {
                     let port_name = ports.first().map(|p| p.name.clone()).unwrap_or_default();
                     let hid = handle_id("in", id_for_drag, &port_name);
@@ -594,6 +826,34 @@ fn NodeView(
                                     </div>
                                 }
                             }).collect_view()}
+                            {matches!(pk, ProcessNodeKind::Mux).then(|| {
+                                let cur_clips = match &node_signal.get_untracked().settings {
+                                    Some(api_types::NodeSettings::Mux { num_clips, .. }) => *num_clips,
+                                    _ => 1,
+                                };
+                                let cur_fps = match &node_signal.get_untracked().settings {
+                                    Some(api_types::NodeSettings::Mux { fps, .. }) => *fps,
+                                    _ => 30,
+                                };
+                                view! {
+                                    <div
+                                        class="add-port-btn"
+                                        on:click=move |ev: MouseEvent| {
+                                            ev.stop_propagation();
+                                            let new_n = cur_clips + 1;
+                                            let settings = api_types::NodeSettings::Mux { num_clips: new_n, fps: cur_fps };
+                                            node_signal.update(|n| n.settings = Some(settings.clone()));
+                                            spawn_local(async move {
+                                                let _ = project_service::update_node_settings(
+                                                    project_id, id_for_drag, settings
+                                                ).await;
+                                            });
+                                        }
+                                    >
+                                        "+"
+                                    </div>
+                                }
+                            })}
                         </div>
                     }.into_view()
                 }
@@ -607,8 +867,30 @@ fn NodeView(
             >
                 <span class="node-kind-badge">{move || kind_label(node_signal.get().kind)}</span>
                 <div class="spacer"></div>
+                {is_process.then(|| view! {
+                    <button class="header-btn refresh" title="Принудительно пересчитать"
+                        on:click=move |ev: MouseEvent| {
+                            ev.stop_propagation();
+                            spawn_local(async move {
+                                match project_service::invalidate_node(project_id, id_for_drag).await {
+                                    Ok(out) => {
+                                        if out.task_id != uuid::Uuid::nil() {
+                                            active_task_id.set(Some(out.task_id));
+                                            node_signal.update(|n| {
+                                                n.output = None;
+                                                n.task_status = Some(TaskStatus::Queued);
+                                            });
+                                            poll_task(active_task_id, node_signal, out.task_id, project_id);
+                                        }
+                                    }
+                                    Err(e) => on_upload_error(e.to_string()),
+                                }
+                            });
+                        }
+                    >"↻"</button>
+                })}
                 <div style="position: relative;">
-                    <button class="delete" on:click=move |ev: MouseEvent| {
+                    <button class="header-btn delete" on:click=move |ev: MouseEvent| {
                         ev.stop_propagation();
                         confirm_delete.update(|v| *v = !*v);
                     }>
@@ -626,15 +908,64 @@ fn NodeView(
                     </Show>
                 </div>
             </div>
-            <div class="node-body">
+            <div class="node-body" style=move || {
+                if has_multi_inputs {
+                    let n = node_signal.get();
+                    let num_ports = if let NodeKind::Process(pk) = n.kind {
+                        pk.input_ports_with_settings(n.settings.as_ref()).len()
+                    } else { 0 };
+                    // ~20px per port row
+                    format!("min-height: {}px;", num_ports * 20)
+                } else {
+                    String::new()
+                }
+            }>
                 {move || {
                     let n = node_signal.get();
                     match n.kind {
+                        NodeKind::Input(InputNodeKind::VideoArray) => {
+                            let count = n.assets.len();
+                            view! {
+                                <div class="video-array-count">
+                                    {format!("{} видео", count)}
+                                </div>
+                                <label class="video-array-add">
+                                    "+"
+                                    <input type="file" accept="video/*" multiple=true style="display:none"
+                                        on:change=move |ev: Event| {
+                                            let target = ev.target().and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
+                                            let Some(input_el) = target else { return };
+                                            let Some(files) = input_el.files() else { return };
+                                            let pid = project_id;
+                                            let nid = id_for_drag;
+                                            let mut file_list = Vec::new();
+                                            for i in 0..files.length() {
+                                                if let Some(f) = files.item(i) { file_list.push(f); }
+                                            }
+                                            spawn_local(async move {
+                                                for file in file_list {
+                                                    if let Err(e) = upload_service::upload_file(pid, nid, InputNodeKind::Video, file, |_| {}).await {
+                                                        on_upload_error(e.to_string());
+                                                        break;
+                                                    }
+                                                }
+                                                // Refresh node from server
+                                                if let Ok(proj) = project_service::get_project(pid).await {
+                                                    if let Some(updated) = proj.project.nodes.iter().find(|n| n.id == nid) {
+                                                        node_signal.set(updated.clone());
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    />
+                                </label>
+                            }.into_view()
+                        }
                         NodeKind::Input(_) => {
                             match (n.asset.clone(), upload_progress.get()) {
                                 (Some(asset), _) => {
                                     let nid = n.id;
-                                    view! { <AssetView project_id=project_id node_id=nid asset=asset player_src=player_src /> }.into_view()
+                                    view! { <AssetView project_id=project_id node_id=nid asset=asset /> }.into_view()
                                 }
                                 (None, Some((sent, total))) => view! {
                                     <div class="upload-form">
@@ -657,16 +988,73 @@ fn NodeView(
                                 },
                             }
                         }
+                        NodeKind::Process(ProcessNodeKind::Scalar) => {
+                            // Inline number editor — no "Обновить" button
+                            let current_val = match &n.settings {
+                                Some(api_types::NodeSettings::Scalar { value }) => *value,
+                                _ => 0.0,
+                            };
+                            let val_str = create_rw_signal(format!("{}", current_val));
+                            view! {
+                                <input
+                                    type="text"
+                                    class="scalar-input"
+                                    prop:value=move || val_str.get()
+                                    on:input=move |ev| val_str.set(event_target_value(&ev))
+                                    on:change=move |_| {
+                                        let text = val_str.get_untracked();
+                                        if let Ok(v) = text.parse::<f64>() {
+                                            let settings = api_types::NodeSettings::Scalar { value: v };
+                                            node_signal.update(|n| n.settings = Some(settings.clone()));
+                                            spawn_local(async move {
+                                                let _ = project_service::update_node_settings(
+                                                    project_id, id_for_drag, settings
+                                                ).await;
+                                                let _ = project_service::run_node(project_id, id_for_drag).await;
+                                            });
+                                        }
+                                    }
+                                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            let target = ev.target().unwrap();
+                                            let el = target.unchecked_ref::<web_sys::HtmlElement>();
+                                            el.blur().ok();
+                                        }
+                                    }
+                                />
+                            }.into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::Spline) => {
+                            // Spline just shows "Готово" or "Обновить" via normal flow
+                            // but auto-runs on settings change (no manual button needed for now)
+                            let has_output = n.output.is_some();
+                            let needs_update = n.needs_update;
+                            if has_output && !needs_update {
+                                view! { <div class="process-done">"Готово"</div> }.into_view()
+                            } else {
+                                // Auto-run spline
+                                let nid = n.id;
+                                spawn_local(async move {
+                                    let _ = project_service::run_node(project_id, nid).await;
+                                });
+                                view! { <div class="process-hint">"Вычисление..."</div> }.into_view()
+                            }
+                        }
                         NodeKind::Process(pk) => {
                             let status = n.task_status;
                             let has_output = n.output.is_some();
                             let needs_update = n.needs_update;
-                            let connected = has_input_edge.get();
+                            let missing = missing_ports.get();
+                            let all_connected = missing.is_empty();
+                            let no_inputs_needed = !pk.has_inputs();
 
-                            let show_update = needs_update || (connected && !has_output);
+                            let can_run = all_connected || no_inputs_needed;
+                            let show_update = can_run && (needs_update || !has_output);
 
-                            let status_view = if !connected {
-                                view! { <div class="process-hint">"Подключите вход"</div> }.into_view()
+                            let status_view = if !can_run {
+                                let names = missing.join(", ");
+                                view! { <div class="process-hint">{format!("Подключите: {}", names)}</div> }.into_view()
                             } else if let Some(TaskStatus::Running { progress_pct }) = status {
                                 view! {
                                     <div class="process-progress">
@@ -693,16 +1081,35 @@ fn NodeView(
                             };
 
                             let output_view = if has_output && !needs_update {
-                                match pk {
-                                    ProcessNodeKind::ExtractAudio | ProcessNodeKind::TrimAudio => {
-                                        let slug = pk.url_slug();
-                                        let cache_bust = n.output.as_ref()
-                                            .map(|o| {
-                                                let mut h: u64 = 0;
-                                                for b in o.cache_key.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
-                                                format!("{:x}", h)
-                                            })
-                                            .unwrap_or_default();
+                                let slug = pk.url_slug();
+                                let cache_bust = n.output.as_ref()
+                                    .map(|o| format!("{:x}-{}", {
+                                        let mut h: u64 = 0;
+                                        for b in o.cache_key.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                                        h
+                                    }, o.size_bytes))
+                                    .unwrap_or_default();
+                                let out_kind = pk.produced_output();
+
+                                match out_kind {
+                                    api_types::NodeOutputKind::Video => {
+                                        let thumb_url = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/thumbnail?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
+                                        let file_src = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/file?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
+                                        let loop_base = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/loop-clip?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
+                                        view! {
+                                            <VideoPlayer thumb_url=thumb_url file_url=file_src loop_clip_base=loop_base />
+                                        }.into_view()
+                                    }
+                                    api_types::NodeOutputKind::Audio => {
                                         let wave_url = absolute_url(&format!(
                                             "/api/projects/{}/nodes/{}/{}/thumbnail?v={}",
                                             project_id, slug, n.id, cache_bust
@@ -719,8 +1126,59 @@ fn NodeView(
                                             <AudioPlayer wave_url=wave_url file_url=file_src loop_clip_base=loop_base />
                                         }.into_view()
                                     }
-                                    ProcessNodeKind::DetectSilence | ProcessNodeKind::DetectSubtitles | ProcessNodeKind::SpeechBounds => {
-                                        let slug = pk.url_slug();
+                                    api_types::NodeOutputKind::Json => {
+                                        match pk {
+                                    ProcessNodeKind::Clip => {
+                                        // Clip has video preview despite Json output
+                                        let file_src = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/file?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
+                                        let thumb_url = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/thumbnail?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
+                                        let loop_base = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/loop-clip?v={}",
+                                            project_id, slug, n.id, cache_bust
+                                        ));
+                                        view! {
+                                            <VideoPlayer thumb_url=thumb_url file_url=file_src loop_clip_base=loop_base />
+                                        }.into_view()
+                                    }
+                                    ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+                                    | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => {
+                                        let file_url = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/file",
+                                            project_id, slug, n.id
+                                        ));
+                                        let result_val = create_rw_signal("...".to_string());
+                                        {
+                                            let file_url = file_url.clone();
+                                            spawn_local(async move {
+                                                let window = web_sys::window().unwrap();
+                                                if let Ok(resp) = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&file_url)).await {
+                                                    let resp: web_sys::Response = resp.unchecked_into();
+                                                    if let Ok(text_p) = resp.text() {
+                                                        if let Ok(text_v) = wasm_bindgen_futures::JsFuture::from(text_p).await {
+                                                            if let Some(s) = text_v.as_string() {
+                                                                if let Ok(parsed) = js_sys::JSON::parse(&s) {
+                                                                    let val = js_sys::Reflect::get(&parsed, &"value".into()).ok();
+                                                                    if let Some(v) = val.and_then(|v| v.as_f64()) {
+                                                                        result_val.set(format!("{}", v));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        view! {
+                                            <div class="math-result">{move || result_val.get()}</div>
+                                        }.into_view()
+                                    }
+                                    _ => {
                                         let json_url = absolute_url(&format!(
                                             "/api/projects/{}/nodes/{}/{}/file",
                                             project_id, slug, n.id
@@ -734,6 +1192,11 @@ fn NodeView(
                                                 >"Посмотреть"</button>
                                             </div>
                                         }.into_view()
+                                    }
+                                }
+                                    }
+                                    api_types::NodeOutputKind::Image => {
+                                        view! { <div class="process-done">"Готово"</div> }.into_view()
                                     }
                                 }
                             } else {
@@ -751,8 +1214,7 @@ fn NodeView(
             {move || {
                 let n = node_signal.get();
                 let ports = match n.kind {
-                    NodeKind::Process(pk) => pk.output_ports(),
-                    _ => vec![api_types::PortDef { name: String::new(), kind: n.kind.produced_output() }],
+                    _ => n.kind.output_ports(),
                 };
                 if ports.len() <= 1 {
                     let port_name = ports.first().map(|p| p.name.clone()).unwrap_or_default();
@@ -802,6 +1264,161 @@ fn NodeView(
 }
 
 #[component]
+fn VideoPlayer(
+    thumb_url: String,
+    file_url: String,
+    loop_clip_base: String,
+) -> impl IntoView {
+    let playing = create_rw_signal(false);
+    let playhead_pct = create_rw_signal(0.0_f64);
+    let video_ref = create_node_ref::<html::Video>();
+
+    let selection = create_rw_signal::<Option<(f64, f64)>>(None);
+    let selecting_from = create_rw_signal::<Option<f64>>(None);
+
+    let on_thumb_mousedown = move |ev: MouseEvent| {
+        ev.prevent_default();
+        let target = ev.target().unwrap();
+        let el = target.unchecked_ref::<web_sys::HtmlElement>();
+        let rect = el.get_bounding_client_rect();
+        let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        selecting_from.set(Some(pct));
+        selection.set(None);
+        if playing.get_untracked() {
+            if let Some(v) = video_ref.get_untracked() {
+                let el: &web_sys::HtmlMediaElement = v.unchecked_ref();
+                el.pause().ok();
+                playing.set(false);
+            }
+        }
+    };
+
+    let on_thumb_mousemove = move |ev: MouseEvent| {
+        let Some(start) = selecting_from.get_untracked() else { return };
+        let target = ev.target().unwrap();
+        let el = target.unchecked_ref::<web_sys::HtmlElement>();
+        let rect = el.get_bounding_client_rect();
+        let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let (a, b) = if pct < start { (pct, start) } else { (start, pct) };
+        if (b - a) > 0.01 { selection.set(Some((a, b))); }
+    };
+
+    let on_thumb_mouseup = move |_| { selecting_from.set(None); };
+
+    let toggle = {
+        let file_url = file_url.clone();
+        let loop_clip_base = loop_clip_base.clone();
+        move |_| {
+            let Some(video) = video_ref.get_untracked() else { return };
+            let el: web_sys::HtmlMediaElement = video.unchecked_ref::<web_sys::HtmlMediaElement>().clone();
+            if playing.get_untracked() {
+                el.pause().ok();
+                playing.set(false);
+                return;
+            }
+            // If already has src (paused) — just resume
+            let current_src = el.src();
+            let want_src = if let Some((a, b)) = selection.get_untracked() {
+                format!("{}&start={:.4}&end={:.4}", loop_clip_base, a, b)
+            } else {
+                file_url.clone()
+            };
+            let need_reload = current_src.is_empty() || !current_src.ends_with(&want_src);
+            if need_reload {
+                el.set_src(&want_src);
+                el.set_loop(selection.get_untracked().is_some());
+                el.load();
+            }
+            el.set_volume(1.0);
+            el.set_muted(false);
+            playing.set(true);
+            if let Ok(p) = el.play() {
+                spawn_local(async move {
+                    let _ = wasm_bindgen_futures::JsFuture::from(p).await;
+                });
+            }
+        }
+    };
+
+    let on_timeupdate = move |_| {
+        let Some(video) = video_ref.get_untracked() else { return };
+        let el: &web_sys::HtmlMediaElement = video.unchecked_ref();
+        let dur = el.duration();
+        let cur = el.current_time();
+        if dur.is_finite() && dur > 0.0 {
+            if let Some((a, b)) = selection.get_untracked() {
+                playhead_pct.set((a + (cur / dur) * (b - a)) * 100.0);
+            } else {
+                playhead_pct.set(cur / dur * 100.0);
+            }
+        }
+    };
+
+    let on_ended = move |_| { playing.set(false); playhead_pct.set(0.0); };
+
+    let clear_selection = move |ev: MouseEvent| {
+        ev.stop_propagation();
+        selection.set(None);
+        if playing.get_untracked() {
+            if let Some(v) = video_ref.get_untracked() {
+                let el: &web_sys::HtmlMediaElement = v.unchecked_ref();
+                el.pause().ok();
+                playing.set(false);
+            }
+        }
+    };
+
+    view! {
+        <div class="video-player" class:playing=move || playing.get()>
+            <div
+                class="video-thumb-wrap"
+                on:mousedown=on_thumb_mousedown
+                on:mousemove=on_thumb_mousemove
+                on:mouseup=on_thumb_mouseup
+                on:mouseleave=move |_| selecting_from.set(None)
+            >
+                <video
+                    node_ref=video_ref
+                    class="node-video"
+                    poster=thumb_url
+                    src=file_url
+                    preload="metadata"
+                    on:timeupdate=on_timeupdate
+                    on:ended=on_ended
+                />
+                {move || selection.get().map(|(a, b)| {
+                    let left = format!("{:.2}%", a * 100.0);
+                    let width = format!("{:.2}%", (b - a) * 100.0);
+                    view! { <div class="selection-highlight" style:left=left style:width=width></div> }
+                })}
+                <div class="playhead" style=move || format!("left: {:.2}%;", playhead_pct.get())></div>
+            </div>
+            <div class="audio-controls">
+                <button class="play-btn-inline" on:click=toggle>
+                    {move || if playing.get() {
+                        view! {
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                                <rect x="6" y="4" width="4" height="16"/>
+                                <rect x="14" y="4" width="4" height="16"/>
+                            </svg>
+                        }.into_view()
+                    } else {
+                        view! {
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                                <polygon points="6,3 20,12 6,21"/>
+                            </svg>
+                        }.into_view()
+                    }}
+                </button>
+                {move || selection.get().map(|_| view! {
+                    <button class="clear-sel-btn" on:click=clear_selection title="Снять выделение">"✕"</button>
+                })}
+            </div>
+        </div>
+    }
+}
+
+#[component]
 fn UploadInput(
     kind: InputNodeKind,
     on_file: impl Fn(FileList) + Copy + 'static,
@@ -810,6 +1427,7 @@ fn UploadInput(
         InputNodeKind::Video => "video/*",
         InputNodeKind::Audio => "audio/*",
         InputNodeKind::Image => "image/*",
+        InputNodeKind::VideoArray => "video/*",
     };
     view! {
         <input
@@ -824,6 +1442,21 @@ fn UploadInput(
                 }
             }
         />
+    }
+}
+
+fn load_cam(key: &str) -> Option<CanvasTransform> {
+    let storage = web_sys::window()?.local_storage().ok()??;
+    let val = storage.get_item(key).ok()??;
+    let parts: Vec<&str> = val.split(',').collect();
+    if parts.len() == 3 {
+        Some(CanvasTransform {
+            offset_x: parts[0].parse().ok()?,
+            offset_y: parts[1].parse().ok()?,
+            scale: parts[2].parse().ok()?,
+        })
+    } else {
+        None
     }
 }
 
@@ -878,7 +1511,6 @@ fn AssetView(
     project_id: Uuid,
     node_id: Uuid,
     asset: api_types::Asset,
-    player_src: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let original = asset.original_name.clone();
     let size = format_size(asset.size_bytes);
@@ -886,93 +1518,15 @@ fn AssetView(
 
     match kind {
         InputNodeKind::Video => {
-            let debounced_t = create_rw_signal::<Option<f32>>(None);
-            let cursor_x_pct = create_rw_signal::<Option<f64>>(None);
-            let debounce_handle = create_rw_signal::<Option<i32>>(None);
-
-
-            let base_url = thumbnail_url(project_id, node_id, kind);
-            let img_src = Signal::derive(move || {
-                match debounced_t.get() {
-                    Some(t) => thumbnail_url_with_t(project_id, node_id, kind, t),
-                    None => base_url.clone(),
-                }
-            });
-
-            let quantize = |v: f32| -> f32 {
-                (v * 50.0).round() / 50.0
-            };
-
-            let on_move = move |ev: MouseEvent| {
-                let target = ev.target().unwrap();
-                let el = target.unchecked_ref::<web_sys::HtmlElement>();
-                let rect = el.get_bounding_client_rect();
-                let x = ev.client_x() as f64 - rect.left();
-                let w = rect.width();
-                let pct = if w > 0.0 { (x / w).clamp(0.0, 1.0) } else { 0.0 };
-
-                cursor_x_pct.set(Some(pct));
-
-                if let Some(h) = debounce_handle.get_untracked() {
-                    web_sys::window().unwrap().clear_timeout_with_handle(h);
-                }
-
-                let q = quantize(pct as f32);
-                let handle = web_sys::window()
-                    .unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(
-                        &wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
-                            if debounced_t.get_untracked() != Some(q) {
-                                debounced_t.set(Some(q));
-                            }
-                        })
-                        .into_js_value()
-                        .unchecked_ref(),
-                        150,
-                    )
-                    .unwrap();
-                debounce_handle.set(Some(handle));
-            };
-
-            let on_leave = move |_| {
-                if let Some(h) = debounce_handle.get_untracked() {
-                    web_sys::window().unwrap().clear_timeout_with_handle(h);
-                }
-                debounce_handle.set(None);
-                cursor_x_pct.set(None);
-                debounced_t.set(None);
-            };
-
-            let video_src = file_url(project_id, node_id, kind);
-
+            let thumb = thumbnail_url(project_id, node_id, kind);
+            let file = file_url(project_id, node_id, kind);
+            let slug = kind.url_slug();
+            let loop_base = absolute_url(&format!(
+                "/api/projects/{project_id}/nodes/{slug}/{node_id}/loop-clip?v=0"
+            ));
             view! {
-                <div class="video-thumb-wrap">
-                    <img
-                        class="media-thumb"
-                        src=img_src
-                        alt=original.clone()
-                        on:mousemove=on_move
-                        on:mouseleave=on_leave
-                    />
-                    {move || cursor_x_pct.get().map(|pct| {
-                        let left = format!("{:.2}%", pct * 100.0);
-                        view! {
-                            <div class="scrub-line" style:left=left></div>
-                        }
-                    })}
-                </div>
+                <VideoPlayer thumb_url=thumb file_url=file loop_clip_base=loop_base />
                 <div class="meta-row">
-                    <button class="play-btn-inline" on:click={
-                        let video_src = video_src.clone();
-                        move |ev: MouseEvent| {
-                            ev.stop_propagation();
-                            player_src.set(Some(video_src.clone()));
-                        }
-                    }>
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-                            <polygon points="6,3 20,12 6,21"/>
-                        </svg>
-                    </button>
                     <span>{original}</span>
                     <span>{size}</span>
                 </div>
@@ -1002,6 +1556,10 @@ fn AssetView(
                     <span>{size}</span>
                 </div>
             }.into_view()
+        }
+        InputNodeKind::VideoArray => {
+            // Should not reach here — VideoArray uses assets vec, not single asset
+            ().into_view()
         }
     }
 }
@@ -1227,6 +1785,110 @@ fn AudioPlayer(
 }
 
 #[component]
+fn NodeListModal(
+    nodes: RwSignal<Vec<Node>>,
+    on_delete: impl Fn(Vec<Uuid>) + Copy + 'static,
+    on_close: impl Fn() + Copy + 'static,
+) -> impl IntoView {
+    let filter = create_rw_signal(String::new());
+    let selected = create_rw_signal::<Vec<Uuid>>(Vec::new());
+
+    let filtered_nodes = Signal::derive(move || {
+        let ns = nodes.get();
+        let f = filter.get().to_lowercase();
+        if f.is_empty() {
+            ns
+        } else {
+            ns.into_iter()
+                .filter(|n| kind_label(n.kind).to_lowercase().contains(&f))
+                .collect()
+        }
+    });
+
+    let toggle_select = move |id: Uuid| {
+        selected.update(|s| {
+            if let Some(pos) = s.iter().position(|&x| x == id) {
+                s.remove(pos);
+            } else {
+                s.push(id);
+            }
+        });
+    };
+
+    let select_all = move |_| {
+        let ids: Vec<Uuid> = filtered_nodes.get_untracked().iter().map(|n| n.id).collect();
+        selected.set(ids);
+    };
+
+    let select_none = move |_| {
+        selected.set(Vec::new());
+    };
+
+    let delete_selected = move |_| {
+        let ids = selected.get_untracked();
+        if !ids.is_empty() {
+            on_delete(ids);
+        }
+    };
+
+    view! {
+        <div class="modal-backdrop" on:click=move |_| on_close()>
+            <div class="modal node-list-modal" on:click=|ev| ev.stop_propagation()>
+                <div class="modal-header">
+                    <span class="modal-title">"Список нод"</span>
+                    <button class="modal-close" on:click=move |_| on_close()>"✕"</button>
+                </div>
+                <div class="node-list-toolbar">
+                    <input type="text"
+                        placeholder="Фильтр..."
+                        prop:value=move || filter.get()
+                        on:input=move |ev| filter.set(event_target_value(&ev))
+                    />
+                    <button class="ghost" on:click=select_all>"Все"</button>
+                    <button class="ghost" on:click=select_none>"Ничего"</button>
+                    <button class="danger" on:click=delete_selected>
+                        {move || {
+                            let count = selected.get().len();
+                            if count > 0 { format!("Удалить ({})", count) } else { "Удалить".to_string() }
+                        }}
+                    </button>
+                </div>
+                <div class="node-list-body">
+                    <For
+                        each=move || filtered_nodes.get()
+                        key=|n| n.id
+                        children=move |node| {
+                            let id = node.id;
+                            let label = kind_label(node.kind);
+                            let name = node.asset.as_ref()
+                                .map(|a| a.original_name.clone())
+                                .or(node.output.as_ref().map(|o| o.file_name.clone()))
+                                .unwrap_or_default();
+                            let is_selected = Signal::derive(move || selected.get().contains(&id));
+                            view! {
+                                <div
+                                    class="node-list-row"
+                                    class:selected=is_selected
+                                    on:click=move |_| toggle_select(id)
+                                >
+                                    {if is_selected.get() {
+                                        view! { <span>"☑"</span> }.into_view()
+                                    } else {
+                                        view! { <span>"☐"</span> }.into_view()
+                                    }}
+                                    <span class="node-list-type">{label}</span>
+                                    <span class="node-list-name">{name}</span>
+                                </div>
+                            }
+                        }
+                    />
+                </div>
+            </div>
+        </div>
+    }
+}
+
+#[component]
 fn JsonModal(
     url: String,
     label: &'static str,
@@ -1274,11 +1936,25 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Input(InputNodeKind::Video) => "Видео",
         NodeKind::Input(InputNodeKind::Audio) => "Аудио",
         NodeKind::Input(InputNodeKind::Image) => "Изображение",
+        NodeKind::Input(InputNodeKind::VideoArray) => "Видео (массив)",
         NodeKind::Process(ProcessNodeKind::ExtractAudio) => "Извлечь аудио",
         NodeKind::Process(ProcessNodeKind::DetectSilence) => "Тишина",
         NodeKind::Process(ProcessNodeKind::DetectSubtitles) => "Субтитры",
         NodeKind::Process(ProcessNodeKind::SpeechBounds) => "Края речи",
         NodeKind::Process(ProcessNodeKind::TrimAudio) => "Обрезка аудио",
+        NodeKind::Process(ProcessNodeKind::TrimVideo) => "Обрезка видео",
+        NodeKind::Process(ProcessNodeKind::Scalar) => "Число",
+        NodeKind::Process(ProcessNodeKind::Spline) => "Сплайн",
+        NodeKind::Process(ProcessNodeKind::Clip) => "Клип",
+        NodeKind::Process(ProcessNodeKind::Mux) => "Композитор",
+        NodeKind::Process(ProcessNodeKind::MathAdd) => "A + B",
+        NodeKind::Process(ProcessNodeKind::MathSubtract) => "A − B",
+        NodeKind::Process(ProcessNodeKind::MathMultiply) => "A × B",
+        NodeKind::Process(ProcessNodeKind::MathDivide) => "A ÷ B",
+        NodeKind::Process(ProcessNodeKind::Map) => "Map",
+        NodeKind::Process(ProcessNodeKind::SubgraphInput) => "Вход",
+        NodeKind::Process(ProcessNodeKind::SubgraphOutput) => "Выход",
+        NodeKind::Process(ProcessNodeKind::Reduce) => "Reduce",
     }
 }
 

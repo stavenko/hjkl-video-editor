@@ -32,10 +32,14 @@ web-sys = { version = "0.3", features = [
     "DomRect",
     "MouseEvent",
     "WheelEvent",
+    "KeyboardEvent",
     "HtmlMediaElement",
     "HtmlAudioElement",
+    "HtmlVideoElement",
     "DragEvent",
     "DataTransfer",
+    "Storage",
+    "AddEventListenerOptions",
 ] }
 js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }

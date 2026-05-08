@@ -20,6 +20,10 @@ impl Ffmpeg {
         Self { binary }
     }
 
+    pub fn binary(&self) -> &str {
+        &self.binary
+    }
+
     fn probe_binary(&self) -> String {
         self.binary
             .replace("ffmpeg", "ffprobe")
@@ -109,7 +113,7 @@ impl Ffmpeg {
                     .arg("-vf")
                     .arg("scale=100:-2");
             }
-            InputNodeKind::Audio => {
+            InputNodeKind::Audio | InputNodeKind::VideoArray => {
                 return Err(FfmpegError::WrongKindForThumbnail(kind));
             }
         }
@@ -254,6 +258,134 @@ impl Ffmpeg {
             .arg("pcm_s16le")
             .arg(output);
         run(cmd, "trim_audio", input, output).await
+    }
+
+    pub async fn trim_video(
+        &self,
+        input: &Path,
+        output: &Path,
+        start_secs: f64,
+        duration_secs: f64,
+    ) -> Result<(), FfmpegError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-ss")
+            .arg(format!("{:.3}", start_secs))
+            .arg("-t")
+            .arg(format!("{:.3}", duration_secs))
+            .arg("-i")
+            .arg(input)
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg(output);
+        run(cmd, "trim_video", input, output).await
+    }
+
+    pub async fn encode_png_sequence(
+        &self,
+        frames_dir: &Path,
+        fps: u32,
+        output: &Path,
+    ) -> Result<(), FfmpegError> {
+        let pattern = frames_dir.join("frame_%06d.png");
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-framerate")
+            .arg(fps.to_string())
+            .arg("-i")
+            .arg(&pattern)
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-preset")
+            .arg("fast")
+            .arg(output);
+        run(cmd, "encode_png_sequence", &pattern, output).await
+    }
+
+    /// Spawn an ffmpeg process that decodes video to raw RGBA frames via stdout pipe.
+    /// Returns (child, width, height). Read `frame_size = w*h*4` bytes per frame from stdout.
+    pub fn spawn_frame_reader(
+        &self,
+        input: &Path,
+        fps: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<std::process::Child, FfmpegError> {
+        let child = std::process::Command::new(&self.binary)
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-i")
+            .arg(input)
+            .arg("-vf")
+            .arg(format!("fps={},scale={}:{}", fps, width, height))
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("pipe:1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|source| FfmpegError::Spawn {
+                op: "spawn_frame_reader",
+                source,
+            })?;
+        Ok(child)
+    }
+
+    /// Spawn an ffmpeg process that encodes raw RGBA frames from stdin to mp4.
+    pub fn spawn_frame_writer(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+        output: &Path,
+    ) -> Result<std::process::Child, FfmpegError> {
+        let child = std::process::Command::new(&self.binary)
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("-s")
+            .arg(format!("{}x{}", width, height))
+            .arg("-r")
+            .arg(fps.to_string())
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-preset")
+            .arg("fast")
+            .arg("-crf")
+            .arg("23")
+            .arg(output)
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|source| FfmpegError::Spawn {
+                op: "spawn_frame_writer",
+                source,
+            })?;
+        Ok(child)
     }
 
     pub async fn convert_to_16k_mono(&self, input: &Path, output: &Path) -> Result<(), FfmpegError> {

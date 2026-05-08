@@ -61,8 +61,12 @@ pub struct Node {
     pub position: Position,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset: Option<Asset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<Asset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<NodeOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subgraph: Option<Box<Graph>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<NodeSettings>,
 }
@@ -91,6 +95,12 @@ pub struct NodeOutput {
     pub mime: String,
     pub size_bytes: u64,
     pub cache_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 impl Asset {
@@ -117,6 +127,9 @@ impl NodeOutput {
             mime: self.mime.clone(),
             size_bytes: self.size_bytes,
             cache_key: self.cache_key.clone(),
+            duration_ms: self.duration_ms,
+            width: self.width,
+            height: self.height,
         }
     }
 }
@@ -128,8 +141,13 @@ impl Node {
             kind: self.kind,
             position: self.position,
             asset: self.asset.as_ref().map(Asset::to_api),
+            assets: self.assets.iter().map(Asset::to_api).collect(),
             output: self.output.as_ref().map(NodeOutput::to_api),
             settings: self.settings.clone(),
+            subgraph: self.subgraph.as_ref().map(|sg| Box::new(api_types::SubGraph {
+                nodes: sg.nodes.iter().map(|n| n.to_api()).collect(),
+                edges: sg.edges.iter().map(|e| e.to_api()).collect(),
+            })),
             task_status: None,
             needs_update: false,
         }

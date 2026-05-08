@@ -1,4 +1,4 @@
-use api_types::{
+use api_types::{NodeSettings, UpdateNodeSettingsInput, UpdateNodeSettingsOutput,
     ConnectNodesInput, ConnectNodesOutput, CreateNodeInput, CreateNodeOutput,
     CreateProjectInput, CreateProjectOutput, DeleteNodeInput, DeleteNodeOutput,
     DeleteProjectInput, DeleteProjectOutput, DisconnectNodesInput, DisconnectNodesOutput,
@@ -123,6 +123,20 @@ pub async fn disconnect_nodes(
     .await
 }
 
+pub async fn invalidate_node(
+    project_id: Uuid,
+    node_id: Uuid,
+) -> Result<RunNodeOutput, ApiClientError> {
+    post(
+        "/api/nodes/invalidate",
+        &RunNodeInput {
+            project_id,
+            node_id,
+        },
+    )
+    .await
+}
+
 pub async fn run_node(
     project_id: Uuid,
     node_id: Uuid,
@@ -132,6 +146,22 @@ pub async fn run_node(
         &RunNodeInput {
             project_id,
             node_id,
+        },
+    )
+    .await
+}
+
+pub async fn update_node_settings(
+    project_id: Uuid,
+    node_id: Uuid,
+    settings: NodeSettings,
+) -> Result<UpdateNodeSettingsOutput, ApiClientError> {
+    post(
+        "/api/nodes/settings",
+        &UpdateNodeSettingsInput {
+            project_id,
+            node_id,
+            settings,
         },
     )
     .await

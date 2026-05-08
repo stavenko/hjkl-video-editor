@@ -69,11 +69,20 @@ pub async fn command(
                 from_node.kind.produced_output(),
             )
         })?;
-    let source_output = from_node.kind.produced_output();
-    if source_output != target_port.kind {
+    let source_ports = from_node.kind.output_ports();
+    let source_port = source_ports
+        .iter()
+        .find(|p| p.name == input.from_port)
+        .ok_or_else(|| {
+            Error::TypeMismatch(
+                format!("No output port {:?} on source node", input.from_port),
+                from_node.kind.produced_output(),
+            )
+        })?;
+    if source_port.kind != target_port.kind {
         return Err(Error::TypeMismatch(
             format!("{:?} port {:?}", process_kind, input.to_port),
-            source_output,
+            source_port.kind,
         ));
     }
 

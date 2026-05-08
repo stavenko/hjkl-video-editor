@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use api_types::{InputNodeKind, UploadFinalizeInput, UploadFinalizeOutput};
+use api_types::{InputNodeKind, NodeKind, UploadFinalizeInput, UploadFinalizeOutput};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
@@ -109,18 +109,29 @@ pub async fn command(
     asset.width = probe.width;
     asset.height = probe.height;
 
-    match session.kind {
-        InputNodeKind::Video | InputNodeKind::Image => {
-            let thumb_path = storage.asset_thumbnail_path(input.project_id, asset.id);
-            ffmpeg
-                .make_thumbnail(session.kind, &target_path, &thumb_path)
-                .await?;
-            asset.has_thumbnail = true;
-        }
-        InputNodeKind::Audio => {
-            let wave_path = storage.asset_waveform_path(input.project_id, asset.id);
-            ffmpeg.make_waveform(&target_path, &wave_path).await?;
-            asset.has_waveform = true;
+    // For VideoArray nodes, skip thumbnail generation for individual items
+    let is_array = {
+        let graph = storage.read_graph(input.project_id).await?;
+        graph.nodes.iter().find(|n| n.id == input.node_id)
+            .map(|n| matches!(n.kind, NodeKind::Input(InputNodeKind::VideoArray)))
+            .unwrap_or(false)
+    };
+
+    if !is_array {
+        match session.kind {
+            InputNodeKind::Video | InputNodeKind::Image => {
+                let thumb_path = storage.asset_thumbnail_path(input.project_id, asset.id);
+                ffmpeg
+                    .make_thumbnail(session.kind, &target_path, &thumb_path)
+                    .await?;
+                asset.has_thumbnail = true;
+            }
+            InputNodeKind::Audio => {
+                let wave_path = storage.asset_waveform_path(input.project_id, asset.id);
+                ffmpeg.make_waveform(&target_path, &wave_path).await?;
+                asset.has_waveform = true;
+            }
+            InputNodeKind::VideoArray => {}
         }
     }
 
@@ -128,7 +139,11 @@ pub async fn command(
     let Some(node) = graph.nodes.iter_mut().find(|n| n.id == input.node_id) else {
         return Err(Error::NodeNotFound(input.node_id));
     };
-    node.asset = Some(asset);
+    if matches!(node.kind, NodeKind::Input(InputNodeKind::VideoArray)) {
+        node.assets.push(asset);
+    } else {
+        node.asset = Some(asset);
+    }
     let api_node = node.to_api();
     storage.write_graph(input.project_id, &graph).await?;
 

@@ -47,7 +47,9 @@ pub async fn command(
         return Err(Error::NotProcessNode);
     }
 
-    if !graph.edges.iter().any(|e| e.to_node == input.node_id) {
+    // Scalar and Spline have no inputs — that's ok
+    let NodeKind::Process(pk) = node.kind else { unreachable!() };
+    if pk.has_inputs() && !graph.edges.iter().any(|e| e.to_node == input.node_id) {
         return Err(Error::NoInput);
     }
 
@@ -68,7 +70,7 @@ pub async fn command(
 
 /// DFS: walk upstream edges, collect process nodes that need re-run.
 /// Deepest nodes end up first in `result` (post-order).
-fn collect_stale_deps(
+pub fn collect_stale_deps(
     graph: &Graph,
     node_id: Uuid,
     result: &mut Vec<Uuid>,

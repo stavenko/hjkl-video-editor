@@ -2,7 +2,7 @@ use actix_web::web;
 
 use crate::api::endpoints::{
     asset_thumbnail, asset_waveform, config_frontend, connect_nodes, disconnect_nodes, node_create,
-    node_delete, node_file, node_loop_clip, node_position, node_thumbnail, project_get, projects_create,
+    invalidate_node, node_delete, node_file, node_loop_clip, node_position, node_settings, node_thumbnail, project_get, projects_create,
     projects_delete, projects_list, projects_rename, run_node, task_status, upload_begin,
     upload_chunk, upload_finalize,
 };
@@ -47,7 +47,9 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route("/position", web::post().to(node_position::handler))
             .route("/connect", web::post().to(connect_nodes::handler))
             .route("/disconnect", web::post().to(disconnect_nodes::handler))
+            .route("/settings", web::post().to(node_settings::handler))
             .route("/run", web::post().to(run_node::handler))
+            .route("/invalidate", web::post().to(invalidate_node::handler))
             .route("/task-status", web::post().to(task_status::handler)),
     );
     cfg.service(

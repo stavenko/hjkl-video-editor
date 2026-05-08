@@ -4,6 +4,9 @@ use uuid::Uuid;
 
 pub const CONTENT_TYPE: &str = "application/x-postcard";
 
+fn default_one() -> f64 { 1.0 }
+fn default_preview_width() -> u32 { 320 }
+
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(value)
 }
@@ -19,6 +22,7 @@ pub enum InputNodeKind {
     Video,
     Audio,
     Image,
+    VideoArray,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +32,42 @@ pub enum ProcessNodeKind {
     DetectSubtitles,
     SpeechBounds,
     TrimAudio,
+    TrimVideo,
+    Scalar,
+    Spline,
+    Clip,
+    Mux,
+    MathAdd,
+    MathSubtract,
+    MathMultiply,
+    MathDivide,
+    Map,
+    SubgraphInput,
+    SubgraphOutput,
+    Reduce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReduceOp {
+    ConcatVideo,
+    Sum,
+    Collect,
+}
+
+// ─── Spline types (shared) ───
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Interpolation {
+    Linear,
+    CatmullRom,
+    Step,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineKeyframe {
+    pub t: f64,
+    pub value: f64,
+    pub interpolation: Interpolation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +82,7 @@ impl InputNodeKind {
             InputNodeKind::Video => "video-input",
             InputNodeKind::Audio => "audio-input",
             InputNodeKind::Image => "image-input",
+            InputNodeKind::VideoArray => "video-array",
         }
     }
 
@@ -50,6 +91,7 @@ impl InputNodeKind {
             "video-input" => Some(InputNodeKind::Video),
             "audio-input" => Some(InputNodeKind::Audio),
             "image-input" => Some(InputNodeKind::Image),
+            "video-array" => Some(InputNodeKind::VideoArray),
             _ => None,
         }
     }
@@ -63,6 +105,19 @@ impl ProcessNodeKind {
             ProcessNodeKind::DetectSubtitles => "detect-subtitles",
             ProcessNodeKind::SpeechBounds => "speech-bounds",
             ProcessNodeKind::TrimAudio => "trim-audio",
+            ProcessNodeKind::TrimVideo => "trim-video",
+            ProcessNodeKind::Scalar => "scalar",
+            ProcessNodeKind::Spline => "spline",
+            ProcessNodeKind::Clip => "clip",
+            ProcessNodeKind::Mux => "mux",
+            ProcessNodeKind::MathAdd => "math-add",
+            ProcessNodeKind::MathSubtract => "math-sub",
+            ProcessNodeKind::MathMultiply => "math-mul",
+            ProcessNodeKind::MathDivide => "math-div",
+            ProcessNodeKind::Map => "map",
+            ProcessNodeKind::SubgraphInput => "subgraph-input",
+            ProcessNodeKind::SubgraphOutput => "subgraph-output",
+            ProcessNodeKind::Reduce => "reduce",
         }
     }
 
@@ -73,6 +128,19 @@ impl ProcessNodeKind {
             "detect-subtitles" => Some(ProcessNodeKind::DetectSubtitles),
             "speech-bounds" => Some(ProcessNodeKind::SpeechBounds),
             "trim-audio" => Some(ProcessNodeKind::TrimAudio),
+            "trim-video" => Some(ProcessNodeKind::TrimVideo),
+            "scalar" => Some(ProcessNodeKind::Scalar),
+            "spline" => Some(ProcessNodeKind::Spline),
+            "clip" => Some(ProcessNodeKind::Clip),
+            "mux" => Some(ProcessNodeKind::Mux),
+            "math-add" => Some(ProcessNodeKind::MathAdd),
+            "math-sub" => Some(ProcessNodeKind::MathSubtract),
+            "math-mul" => Some(ProcessNodeKind::MathMultiply),
+            "math-div" => Some(ProcessNodeKind::MathDivide),
+            "map" => Some(ProcessNodeKind::Map),
+            "subgraph-input" => Some(ProcessNodeKind::SubgraphInput),
+            "subgraph-output" => Some(ProcessNodeKind::SubgraphOutput),
+            "reduce" => Some(ProcessNodeKind::Reduce),
             _ => None,
         }
     }
@@ -83,7 +151,18 @@ impl ProcessNodeKind {
             ProcessNodeKind::DetectSilence => NodeOutputKind::Audio,
             ProcessNodeKind::DetectSubtitles => NodeOutputKind::Audio,
             ProcessNodeKind::SpeechBounds => NodeOutputKind::Audio,
-            ProcessNodeKind::TrimAudio => NodeOutputKind::Audio, // primary input
+            ProcessNodeKind::TrimAudio => NodeOutputKind::Audio,
+            ProcessNodeKind::TrimVideo => NodeOutputKind::Video,
+            ProcessNodeKind::Scalar => NodeOutputKind::Json,
+            ProcessNodeKind::Spline => NodeOutputKind::Json, // no input
+            ProcessNodeKind::Clip => NodeOutputKind::Json,
+            ProcessNodeKind::Mux => NodeOutputKind::Video,
+            ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => NodeOutputKind::Json,
+            ProcessNodeKind::Map => NodeOutputKind::Json,
+            ProcessNodeKind::SubgraphInput => NodeOutputKind::Json, // type configured in settings
+            ProcessNodeKind::SubgraphOutput => NodeOutputKind::Json,
+            ProcessNodeKind::Reduce => NodeOutputKind::Json,
         }
     }
 
@@ -94,7 +173,22 @@ impl ProcessNodeKind {
             ProcessNodeKind::DetectSubtitles => NodeOutputKind::Json,
             ProcessNodeKind::SpeechBounds => NodeOutputKind::Json,
             ProcessNodeKind::TrimAudio => NodeOutputKind::Audio,
+            ProcessNodeKind::TrimVideo => NodeOutputKind::Video,
+            ProcessNodeKind::Scalar => NodeOutputKind::Json,
+            ProcessNodeKind::Spline => NodeOutputKind::Json,
+            ProcessNodeKind::Clip => NodeOutputKind::Json,
+            ProcessNodeKind::Mux => NodeOutputKind::Video,
+            ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => NodeOutputKind::Json,
+            ProcessNodeKind::Map => NodeOutputKind::Json,
+            ProcessNodeKind::SubgraphInput => NodeOutputKind::Json,
+            ProcessNodeKind::SubgraphOutput => NodeOutputKind::Json,
+            ProcessNodeKind::Reduce => NodeOutputKind::Json,
         }
+    }
+
+    pub fn has_inputs(&self) -> bool {
+        !matches!(self, ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::SubgraphInput)
     }
 }
 
@@ -111,6 +205,25 @@ pub enum NodeSettings {
         window_ms: u32,
     },
     TrimAudio,
+    TrimVideo,
+    Scalar { value: f64 },
+    Spline { keyframes: Vec<SplineKeyframe> },
+    Clip {
+        trim_start_ms: f64,
+        trim_end_ms: f64,
+        #[serde(default)]
+        time_in: f64,
+        #[serde(default = "default_one")]
+        time_out: f64,
+        #[serde(default = "default_preview_width")]
+        preview_width: u32,
+    },
+    Mux { num_clips: u32, fps: u32 },
+    MathOp,
+    Map,
+    SubgraphInput { output_kind: NodeOutputKind },
+    SubgraphOutput { name: String },
+    Reduce { operation: ReduceOp },
 }
 
 impl NodeSettings {
@@ -128,6 +241,28 @@ impl NodeSettings {
                 window_ms: 10,
             },
             ProcessNodeKind::TrimAudio => NodeSettings::TrimAudio,
+            ProcessNodeKind::TrimVideo => NodeSettings::TrimVideo,
+            ProcessNodeKind::Scalar => NodeSettings::Scalar { value: 0.0 },
+            ProcessNodeKind::Spline => NodeSettings::Spline {
+                keyframes: vec![
+                    SplineKeyframe { t: 0.0, value: 0.0, interpolation: Interpolation::Linear },
+                    SplineKeyframe { t: 1.0, value: 1.0, interpolation: Interpolation::Linear },
+                ],
+            },
+            ProcessNodeKind::Clip => NodeSettings::Clip {
+                trim_start_ms: 0.0,
+                trim_end_ms: 0.0,
+                time_in: 0.0,
+                time_out: 1.0,
+                preview_width: 320,
+            },
+            ProcessNodeKind::Mux => NodeSettings::Mux { num_clips: 1, fps: 30 },
+            ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => NodeSettings::MathOp,
+            ProcessNodeKind::Map => NodeSettings::Map,
+            ProcessNodeKind::SubgraphInput => NodeSettings::SubgraphInput { output_kind: NodeOutputKind::Video },
+            ProcessNodeKind::SubgraphOutput => NodeSettings::SubgraphOutput { name: "output".to_string() },
+            ProcessNodeKind::Reduce => NodeSettings::Reduce { operation: ReduceOp::Collect },
         }
     }
 
@@ -143,6 +278,28 @@ impl NodeSettings {
                 window_ms,
             } => format!("speech-bounds:t={threshold_mul}:on={onset_windows}:off={offset_windows}:w={window_ms}"),
             NodeSettings::TrimAudio => "trim-audio".to_string(),
+            NodeSettings::TrimVideo => "trim-video".to_string(),
+            NodeSettings::Scalar { value } => format!("scalar:{value}"),
+            NodeSettings::Spline { keyframes } => {
+                let mut h: u64 = 0;
+                for kf in keyframes {
+                    h = h.wrapping_mul(31).wrapping_add(kf.t.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.value.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.interpolation as u64);
+                }
+                format!("spline:{h:x}")
+            }
+            NodeSettings::Clip { trim_start_ms, trim_end_ms, time_in, time_out, preview_width } => {
+                format!("clip:s={trim_start_ms}:e={trim_end_ms}:in={time_in}:out={time_out}:pw={preview_width}")
+            }
+            NodeSettings::Mux { num_clips, fps } => {
+                format!("mux:n={num_clips}:fps={fps}")
+            }
+            NodeSettings::MathOp => "math".to_string(),
+            NodeSettings::Map => "map".to_string(),
+            NodeSettings::SubgraphInput { output_kind } => format!("subgraph-input:{:?}", output_kind),
+            NodeSettings::SubgraphOutput { name } => format!("subgraph-output:{name}"),
+            NodeSettings::Reduce { operation } => format!("reduce:{:?}", operation),
         }
     }
 }
@@ -157,11 +314,36 @@ pub enum NodeOutputKind {
 }
 
 impl NodeKind {
+    pub fn output_ports(&self) -> Vec<PortDef> {
+        match self {
+            NodeKind::Input(InputNodeKind::Video) => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Video },
+                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+            ],
+            NodeKind::Input(InputNodeKind::Audio) => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Audio },
+                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+            ],
+            NodeKind::Input(InputNodeKind::Image) => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Image },
+                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+            ],
+            NodeKind::Input(InputNodeKind::VideoArray) => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+            ],
+            NodeKind::Process(pk) => pk.output_ports(),
+        }
+    }
+
     pub fn produced_output(&self) -> NodeOutputKind {
         match self {
             NodeKind::Input(InputNodeKind::Video) => NodeOutputKind::Video,
             NodeKind::Input(InputNodeKind::Audio) => NodeOutputKind::Audio,
             NodeKind::Input(InputNodeKind::Image) => NodeOutputKind::Image,
+            NodeKind::Input(InputNodeKind::VideoArray) => NodeOutputKind::Json,
             NodeKind::Process(p) => p.produced_output(),
         }
     }
@@ -202,6 +384,22 @@ pub struct NodeOutput {
     pub mime: String,
     pub size_bytes: u64,
     pub cache_key: String,
+    #[serde(default)]
+    pub duration_ms: Option<f64>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+// ─── SubGraph (for Map nodes) ───
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubGraph {
+    #[serde(default)]
+    pub nodes: Vec<Node>,
+    #[serde(default)]
+    pub edges: Vec<Edge>,
 }
 
 // ─── Edge ───
@@ -231,21 +429,109 @@ impl ProcessNodeKind {
             ],
             ProcessNodeKind::ExtractAudio | ProcessNodeKind::TrimAudio => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Audio },
+                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::TrimVideo => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Video },
+                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
             ],
             ProcessNodeKind::DetectSilence
             | ProcessNodeKind::DetectSubtitles => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
             ],
+            ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::Clip
+            | ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide
+            | ProcessNodeKind::SubgraphInput | ProcessNodeKind::SubgraphOutput
+            | ProcessNodeKind::Reduce => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::Mux => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Video },
+            ],
+            ProcessNodeKind::Map => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+            ],
+        }
+    }
+
+    /// Port names that MUST be connected for the node to run.
+    pub fn required_input_ports(&self) -> Vec<String> {
+        match self {
+            ProcessNodeKind::Scalar | ProcessNodeKind::Spline => vec![],
+            ProcessNodeKind::TrimAudio => vec!["audio".into(), "start".into(), "end".into()],
+            ProcessNodeKind::TrimVideo => vec!["video".into(), "start".into(), "end".into()],
+            ProcessNodeKind::Clip => vec!["media".into()],
+            ProcessNodeKind::Mux => vec!["duration".into(), "width".into(), "height".into()],
+            ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => vec!["a".into(), "b".into()],
+            ProcessNodeKind::Map => vec!["input".into()],
+            ProcessNodeKind::SubgraphInput => vec![],
+            ProcessNodeKind::SubgraphOutput => vec![String::new()],
+            ProcessNodeKind::Reduce => vec!["array".into()],
+            _ => vec![String::new()],
         }
     }
 
     pub fn input_ports(&self) -> Vec<PortDef> {
+        self.input_ports_with_settings(None)
+    }
+
+    pub fn input_ports_with_settings(&self, settings: Option<&NodeSettings>) -> Vec<PortDef> {
         match self {
+            ProcessNodeKind::Scalar | ProcessNodeKind::Spline => vec![],
             ProcessNodeKind::TrimAudio => vec![
                 PortDef { name: "audio".into(), kind: NodeOutputKind::Audio },
                 PortDef { name: "start".into(), kind: NodeOutputKind::Json },
                 PortDef { name: "end".into(), kind: NodeOutputKind::Json },
             ],
+            ProcessNodeKind::TrimVideo => vec![
+                PortDef { name: "video".into(), kind: NodeOutputKind::Video },
+                PortDef { name: "start".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "end".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => vec![
+                PortDef { name: "a".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "b".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::Map => vec![
+                PortDef { name: "input".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::SubgraphInput => vec![],
+            ProcessNodeKind::SubgraphOutput => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::Reduce => vec![
+                PortDef { name: "array".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::Clip => vec![
+                PortDef { name: "media".into(), kind: NodeOutputKind::Video },
+                PortDef { name: "x".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "y".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "scale".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "corner_radius".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::Mux => {
+                let num_clips = match settings {
+                    Some(NodeSettings::Mux { num_clips, .. }) => *num_clips,
+                    _ => 1,
+                };
+                let mut ports = vec![
+                    PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+                    PortDef { name: "width".into(), kind: NodeOutputKind::Json },
+                    PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+                ];
+                for i in 0..num_clips {
+                    ports.push(PortDef {
+                        name: format!("clip_{i}"),
+                        kind: NodeOutputKind::Json,
+                    });
+                }
+                ports
+            }
             _ => vec![PortDef {
                 name: String::new(),
                 kind: self.accepted_input(),
@@ -274,9 +560,13 @@ pub struct Node {
     #[serde(default)]
     pub asset: Option<Asset>,
     #[serde(default)]
+    pub assets: Vec<Asset>,
+    #[serde(default)]
     pub output: Option<NodeOutput>,
     #[serde(default)]
     pub settings: Option<NodeSettings>,
+    #[serde(default)]
+    pub subgraph: Option<Box<SubGraph>>,
     #[serde(default)]
     pub task_status: Option<TaskStatus>,
     #[serde(default)]

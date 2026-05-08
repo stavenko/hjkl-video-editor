@@ -28,7 +28,16 @@ where
 {
     let total_size = file.size() as u64;
     let original_name = file.name();
-    let mime = file.type_();
+    let mut mime = file.type_();
+    if mime.is_empty() {
+        let name_lower = original_name.to_lowercase();
+        mime = if name_lower.ends_with(".mov") || name_lower.ends_with(".mp4") { "video/mp4".to_string() }
+        else if name_lower.ends_with(".mp3") { "audio/mpeg".to_string() }
+        else if name_lower.ends_with(".wav") { "audio/wav".to_string() }
+        else if name_lower.ends_with(".png") { "image/png".to_string() }
+        else if name_lower.ends_with(".jpg") || name_lower.ends_with(".jpeg") { "image/jpeg".to_string() }
+        else { "application/octet-stream".to_string() };
+    }
 
     let begin: UploadBeginOutput = post(
         "/api/uploads/begin",

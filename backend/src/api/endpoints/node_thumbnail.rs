@@ -70,6 +70,9 @@ pub async fn handler(
                     let thumb = storage.asset_thumbnail_path(params.project_id, asset.id);
                     serve_static_png(&thumb).await
                 }
+                InputNodeKind::VideoArray => {
+                    HttpResponse::NotFound().body("No thumbnail for video array")
+                }
                 InputNodeKind::Audio => {
                     let wave = storage.asset_waveform_path(params.project_id, asset.id);
                     serve_static_png(&wave).await
@@ -78,10 +81,36 @@ pub async fn handler(
         }
         NodeKind::Process(pk) => {
             match pk {
+                ProcessNodeKind::Clip => {
+                    // First frame of preview as thumbnail
+                    let preview = storage.node_output_path(params.project_id, params.node_id, "preview.mp4");
+                    if preview.exists() {
+                        match ffmpeg.generate_frame_at(&preview, 0.0).await {
+                            Ok(png) => return HttpResponse::Ok().content_type("image/png").body(png),
+                            Err(_) => {}
+                        }
+                    }
+                    HttpResponse::NotFound().body("No clip preview")
+                }
+                ProcessNodeKind::TrimVideo => {
+                    let thumb = storage.node_output_path(params.project_id, params.node_id, "thumb.png");
+                    serve_static_png(&thumb).await
+                }
                 ProcessNodeKind::ExtractAudio | ProcessNodeKind::TrimAudio => {
                     // Serve waveform of extracted audio
                     let wave = storage.node_output_waveform_path(params.project_id, params.node_id);
                     serve_static_png(&wave).await
+                }
+                ProcessNodeKind::Mux => {
+                    let output = node.output.as_ref();
+                    if let Some(out) = output {
+                        let video_path = storage.assets_dir(params.project_id).join(&out.file_name);
+                        match ffmpeg.generate_frame_at(&video_path, 0.0).await {
+                            Ok(png) => return HttpResponse::Ok().content_type("image/png").body(png),
+                            Err(_) => {}
+                        }
+                    }
+                    HttpResponse::NotFound().body("No thumbnail")
                 }
                 _ => HttpResponse::NotFound().body("No thumbnail for this node type"),
             }

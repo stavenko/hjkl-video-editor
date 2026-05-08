@@ -1,4 +1,4 @@
-use api_types::{NodeKind, UploadBeginInput, UploadBeginOutput};
+use api_types::{InputNodeKind, NodeKind, UploadBeginInput, UploadBeginOutput};
 
 use crate::providers::project_storage::{ProjectStorage, ProjectStorageError};
 use crate::providers::upload_manager::{UploadError, UploadManager, CHUNK_SIZE};
@@ -49,13 +49,17 @@ pub async fn command(
             expected: input.kind,
         });
     };
-    if node_input_kind != input.kind {
+    // VideoArray accepts Video uploads
+    let kind_ok = node_input_kind == input.kind
+        || (node_input_kind == InputNodeKind::VideoArray && input.kind == InputNodeKind::Video);
+    if !kind_ok {
         return Err(Error::KindMismatch {
             actual: node.kind,
             expected: input.kind,
         });
     }
-    if node.asset.is_some() {
+    // Single-asset nodes: reject if already has asset. Array nodes: always accept.
+    if node_input_kind != InputNodeKind::VideoArray && node.asset.is_some() {
         return Err(Error::NodeHasAsset);
     }
     let upload_id = uploads
