@@ -127,6 +127,15 @@ impl Ffmpeg {
         input: &Path,
         t_secs: f64,
     ) -> Result<Vec<u8>, FfmpegError> {
+        self.generate_frame_at_width(input, t_secs, 100).await
+    }
+
+    pub async fn generate_frame_at_width(
+        &self,
+        input: &Path,
+        t_secs: f64,
+        width: u32,
+    ) -> Result<Vec<u8>, FfmpegError> {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("-y")
             .arg("-hide_banner")
@@ -139,7 +148,7 @@ impl Ffmpeg {
             .arg("-frames:v")
             .arg("1")
             .arg("-vf")
-            .arg("scale=100:-2")
+            .arg(format!("scale={}:-2", width))
             .arg("-f")
             .arg("image2pipe")
             .arg("-vcodec")

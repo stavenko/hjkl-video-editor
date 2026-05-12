@@ -41,6 +41,7 @@ pub async fn create_node(
     project_id: Uuid,
     kind: NodeKind,
     position: Position,
+    parent_map_id: Option<Uuid>,
 ) -> Result<CreateNodeOutput, ApiClientError> {
     post(
         "/api/nodes/create",
@@ -48,6 +49,7 @@ pub async fn create_node(
             project_id,
             kind,
             position,
+            parent_map_id,
         },
     )
     .await
@@ -56,12 +58,14 @@ pub async fn create_node(
 pub async fn delete_node(
     project_id: Uuid,
     node_id: Uuid,
+    parent_map_id: Option<Uuid>,
 ) -> Result<DeleteNodeOutput, ApiClientError> {
     post(
         "/api/nodes/delete",
         &DeleteNodeInput {
             project_id,
             node_id,
+            parent_map_id,
         },
     )
     .await
@@ -78,6 +82,7 @@ pub async fn update_node_position(
             project_id,
             node_id,
             position,
+            parent_map_id: None, // TODO: pass from editor
         },
     )
     .await
@@ -89,6 +94,7 @@ pub async fn connect_nodes(
     from_port: String,
     to_node: Uuid,
     to_port: String,
+    parent_map_id: Option<Uuid>,
 ) -> Result<ConnectNodesOutput, ApiClientError> {
     post(
         "/api/nodes/connect",
@@ -98,6 +104,7 @@ pub async fn connect_nodes(
             from_port,
             to_node,
             to_port,
+            parent_map_id,
         },
     )
     .await
@@ -109,6 +116,7 @@ pub async fn disconnect_nodes(
     from_port: String,
     to_node: Uuid,
     to_port: String,
+    parent_map_id: Option<Uuid>,
 ) -> Result<DisconnectNodesOutput, ApiClientError> {
     post(
         "/api/nodes/disconnect",
@@ -118,6 +126,7 @@ pub async fn disconnect_nodes(
             from_port,
             to_node,
             to_port,
+            parent_map_id,
         },
     )
     .await

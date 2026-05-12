@@ -20,6 +20,8 @@ pub struct PathParams {
 pub struct Query {
     #[serde(default)]
     pub t: Option<f32>,
+    #[serde(default)]
+    pub w: Option<u32>,
 }
 
 pub async fn handler(
@@ -54,7 +56,8 @@ pub async fn handler(
                         let duration = asset.duration_secs.unwrap_or(1.0);
                         let seek_secs = t as f64 * duration;
                         let file_path = storage.asset_file_path(params.project_id, asset);
-                        match ffmpeg.generate_frame_at(&file_path, seek_secs).await {
+                        let width = query.w.unwrap_or(100).clamp(50, 1920);
+                        match ffmpeg.generate_frame_at_width(&file_path, seek_secs, width).await {
                             Ok(png_bytes) => HttpResponse::Ok()
                                 .content_type("image/png")
                                 .insert_header(("Cache-Control", "public, max-age=86400"))
@@ -115,6 +118,7 @@ pub async fn handler(
                 _ => HttpResponse::NotFound().body("No thumbnail for this node type"),
             }
         }
+        NodeKind::Reference { .. } => HttpResponse::NotFound().body("No thumbnail for reference"),
     }
 }
 

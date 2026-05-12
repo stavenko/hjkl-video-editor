@@ -8,6 +8,8 @@ pub enum Error {
     Storage(#[from] ProjectStorageError),
     #[error("Edge not found")]
     EdgeNotFound,
+    #[error("Parent not found")]
+    ParentNotFound,
 }
 
 impl From<Error> for crate::api::Error {
@@ -29,23 +31,23 @@ pub async fn command(
 ) -> Result<DisconnectNodesOutput, Error> {
     let mut graph = storage.read_graph(input.project_id).await?;
 
-    let before = graph.edges.len();
-    graph.edges.retain(|e| {
+    let tg = crate::models::subgraph::get_target_graph_mut(&mut graph, input.parent_map_id)
+        .ok_or(Error::ParentNotFound)?;
+
+    let before = tg.edges.len();
+    tg.edges.retain(|e| {
         !(e.from_node == input.from_node
             && e.from_port == input.from_port
             && e.to_node == input.to_node
             && e.to_port == input.to_port)
     });
-    if graph.edges.len() == before {
+    if tg.edges.len() == before {
         return Err(Error::EdgeNotFound);
     }
 
-    // Clear downstream node's output (input changed)
-    if let Some(node) = graph.nodes.iter_mut().find(|n| n.id == input.to_node) {
+    if let Some(node) = tg.nodes.iter_mut().find(|n| n.id == input.to_node) {
         if let Some(output) = node.output.take() {
-            let path = storage
-                .assets_dir(input.project_id)
-                .join(&output.file_name);
+            let path = storage.assets_dir(input.project_id).join(&output.file_name);
             let _ = tokio::fs::remove_file(&path).await;
         }
     }

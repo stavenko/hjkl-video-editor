@@ -134,6 +134,19 @@ impl NodeOutput {
     }
 }
 
+/// Resolve a reference chain to the actual (non-reference) node.
+pub fn resolve_reference<'a>(nodes: &'a [Node], source: Uuid) -> Option<&'a Node> {
+    let mut current = source;
+    for _ in 0..20 {
+        let node = nodes.iter().find(|n| n.id == current)?;
+        match node.kind {
+            NodeKind::Reference { source: next } => current = next,
+            _ => return Some(node),
+        }
+    }
+    None
+}
+
 impl Node {
     pub fn to_api(&self) -> ApiNode {
         ApiNode {

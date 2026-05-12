@@ -32,7 +32,7 @@ pub fn expected_cache_key(node: &Node, graph: &Graph) -> Option<String> {
         .or(input_edges.first())?;
 
     let primary_upstream = graph.nodes.iter().find(|n| n.id == primary_edge.from_node)?;
-    let primary_cp = upstream_cache_part(primary_upstream)?;
+    let primary_cp = upstream_cache_part(primary_upstream, graph)?;
 
     let mut cache_parts = vec![primary_cp];
     for edge in &input_edges {
@@ -43,7 +43,7 @@ pub fn expected_cache_key(node: &Node, graph: &Graph) -> Option<String> {
             continue;
         }
         if let Some(src) = graph.nodes.iter().find(|n| n.id == edge.from_node) {
-            let cp = upstream_cache_part(src)?;
+            let cp = upstream_cache_part(src, graph)?;
             cache_parts.push(format!("{}={}", edge.to_port, cp));
         }
     }
@@ -93,9 +93,13 @@ pub fn needs_update(node: &Node, graph: &Graph) -> bool {
     }
 }
 
-fn upstream_cache_part(node: &Node) -> Option<String> {
+fn upstream_cache_part(node: &Node, graph: &Graph) -> Option<String> {
     match node.kind {
         NodeKind::Input(_) => node.asset.as_ref().map(|a| a.id.to_string()),
         NodeKind::Process(_) => node.output.as_ref().map(|o| o.cache_key.clone()),
+        NodeKind::Reference { source } => {
+            let resolved = super::project::resolve_reference(&graph.nodes, source)?;
+            upstream_cache_part(resolved, graph)
+        }
     }
 }

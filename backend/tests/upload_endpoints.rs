@@ -110,6 +110,7 @@ async fn create_node(
             project_id,
             kind,
             position: Position { x: 10.0, y: 20.0 },
+            parent_map_id: None,
         },
     );
     let resp = test::call_service(app, req).await;

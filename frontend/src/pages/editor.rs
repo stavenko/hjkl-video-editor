@@ -32,6 +32,10 @@ pub fn EditorPage() -> impl IntoView {
     });
 
     let project = create_rw_signal::<Option<ProjectDetail>>(None);
+    let root_nodes = create_rw_signal::<Vec<Node>>(Vec::new());
+    let root_edges = create_rw_signal::<Vec<Edge>>(Vec::new());
+
+    // Active nodes/edges — switch based on whether we're inside a Map subgraph
     let nodes = create_rw_signal::<Vec<Node>>(Vec::new());
     let edges = create_rw_signal::<Vec<Edge>>(Vec::new());
     let error = create_rw_signal::<Option<String>>(None);
@@ -41,7 +45,10 @@ pub fn EditorPage() -> impl IntoView {
     let connect_mouse = create_rw_signal::<Option<(f32, f32)>>(None);
     let json_modal = create_rw_signal::<Option<(String, &'static str)>>(None);
     let placing_kind = create_rw_signal::<Option<NodeKind>>(None);
+    // Pending phrase selector: (src_node_id, phrase) — not yet created on server
+    let placing_phrase = create_rw_signal::<Option<(Uuid, String)>>(None);
     let node_list_open = create_rw_signal(false);
+    let editing_map = create_rw_signal::<Option<Uuid>>(None); // Some(map_node_id) when inside subgraph
     let placing_pos = create_rw_signal::<Option<(f32, f32)>>(None);
     let drag_state = create_rw_signal::<Option<DragState>>(None);
     let drag_pos = create_rw_signal::<Option<(Uuid, Position)>>(None);
@@ -64,6 +71,25 @@ pub fn EditorPage() -> impl IntoView {
         }
     });
 
+    let switch_to_view = move |proj_nodes: &[Node], proj_edges: &[Edge]| {
+        root_nodes.set(proj_nodes.to_vec());
+        root_edges.set(proj_edges.to_vec());
+        if let Some(map_id) = editing_map.get_untracked() {
+            // Inside a Map subgraph — show subgraph nodes
+            if let Some(map_node) = proj_nodes.iter().find(|n| n.id == map_id) {
+                if let Some(sg) = &map_node.subgraph {
+                    nodes.set(sg.nodes.clone());
+                    edges.set(sg.edges.clone());
+                    return;
+                }
+            }
+            // Map node not found — exit subgraph
+            editing_map.set(None);
+        }
+        nodes.set(proj_nodes.to_vec());
+        edges.set(proj_edges.to_vec());
+    };
+
     let reload = move || {
         let Some(id) = project_id.get_untracked() else {
             return;
@@ -71,8 +97,7 @@ pub fn EditorPage() -> impl IntoView {
         spawn_local(async move {
             match project_service::get_project(id).await {
                 Ok(out) => {
-                    nodes.set(out.project.nodes.clone());
-                    edges.set(out.project.edges.clone());
+                    switch_to_view(&out.project.nodes, &out.project.edges);
                     project.set(Some(out.project));
                     error.set(None);
                 }
@@ -100,7 +125,7 @@ pub fn EditorPage() -> impl IntoView {
         placing_pos.set(None);
         let position = Position { x: cx, y: cy };
         spawn_local(async move {
-            match project_service::create_node(pid, kind, position).await {
+            match project_service::create_node(pid, kind, position, editing_map.get_untracked()).await {
                 Ok(out) => {
                     nodes.update(|ns| ns.push(out.node));
                     error.set(None);
@@ -108,6 +133,23 @@ pub fn EditorPage() -> impl IntoView {
                 Err(e) => error.set(Some(e.to_string())),
             }
         });
+    };
+
+    let enter_map = move |map_node_id: Uuid| {
+        editing_map.set(Some(map_node_id));
+        let rn = root_nodes.get_untracked();
+        if let Some(map_node) = rn.iter().find(|n| n.id == map_node_id) {
+            if let Some(sg) = &map_node.subgraph {
+                nodes.set(sg.nodes.clone());
+                edges.set(sg.edges.clone());
+            }
+        }
+    };
+
+    let exit_map = move || {
+        editing_map.set(None);
+        nodes.set(root_nodes.get_untracked());
+        edges.set(root_edges.get_untracked());
     };
 
     let cancel_placement = move || {
@@ -118,8 +160,14 @@ pub fn EditorPage() -> impl IntoView {
     // Esc cancels placement
     create_effect(move |_| {
         let cb = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
-            if ev.key() == "Escape" && placing_kind.get_untracked().is_some() {
-                cancel_placement();
+            if ev.key() == "Escape" {
+                if placing_kind.get_untracked().is_some() {
+                    cancel_placement();
+                }
+                if placing_phrase.get_untracked().is_some() {
+                    placing_phrase.set(None);
+                    placing_pos.set(None);
+                }
             }
         });
         leptos::document()
@@ -150,7 +198,7 @@ pub fn EditorPage() -> impl IntoView {
             return;
         };
         spawn_local(async move {
-            match project_service::delete_node(pid, node_id).await {
+            match project_service::delete_node(pid, node_id, editing_map.get_untracked()).await {
                 Ok(_) => {
                     nodes.update(|ns| ns.retain(|n| n.id != node_id));
                     error.set(None);
@@ -163,7 +211,7 @@ pub fn EditorPage() -> impl IntoView {
     let on_disconnect = move |from: Uuid, from_port: String, to: Uuid, to_port: String| {
         let Some(pid) = project_id.get_untracked() else { return };
         spawn_local(async move {
-            match project_service::disconnect_nodes(pid, from, from_port, to, to_port).await {
+            match project_service::disconnect_nodes(pid, from, from_port, to, to_port, editing_map.get_untracked()).await {
                 Ok(_) => {
                     error.set(None);
                     reload();
@@ -181,7 +229,7 @@ pub fn EditorPage() -> impl IntoView {
         connecting_from.set(None);
         connect_mouse.set(None);
         spawn_local(async move {
-            match project_service::connect_nodes(pid, from, from_port, to, to_port).await {
+            match project_service::connect_nodes(pid, from, from_port, to, to_port, editing_map.get_untracked()).await {
                 Ok(_) => {
                     error.set(None);
                     reload();
@@ -222,7 +270,7 @@ pub fn EditorPage() -> impl IntoView {
     };
 
     let on_canvas_mouse_move = move |ev: MouseEvent| {
-        if placing_kind.get_untracked().is_some() {
+        if placing_kind.get_untracked().is_some() || placing_phrase.get_untracked().is_some() {
             let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
             placing_pos.set(Some((cx, cy)));
             return;
@@ -246,6 +294,31 @@ pub fn EditorPage() -> impl IntoView {
     let on_mouse_up = move |_ev: MouseEvent| {
         if placing_kind.get_untracked().is_some() {
             confirm_placement();
+            return;
+        }
+        if let Some((src_id, phrase)) = placing_phrase.get_untracked() {
+            let Some((cx, cy)) = placing_pos.get_untracked() else { return };
+            placing_phrase.set(None);
+            placing_pos.set(None);
+            let Some(pid) = project_id.get_untracked() else { return };
+            let parent = editing_map.get_untracked();
+            let pos = Position { x: cx, y: cy };
+            spawn_local(async move {
+                let kind = NodeKind::Process(ProcessNodeKind::SubtitlePiece);
+                if let Ok(out) = project_service::create_node(pid, kind, pos, parent).await {
+                    let ps_id = out.node.id;
+                    let settings = api_types::NodeSettings::SubtitlePiece {
+                        phrase, occurrence: 0,
+                    };
+                    let _ = project_service::update_node_settings(pid, ps_id, settings).await;
+                    let _ = project_service::connect_nodes(
+                        pid, src_id, String::new(),
+                        ps_id, "subtitles".to_string(), parent
+                    ).await;
+                    let _ = project_service::run_node(pid, ps_id).await;
+                    reload();
+                }
+            });
             return;
         }
         if connecting_from.get_untracked().is_some() {
@@ -291,9 +364,29 @@ pub fn EditorPage() -> impl IntoView {
         <div style="position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg);">
 
             <div class="editor-toolbar">
-                <A href="/" attr:class="back">"← Проекты"</A>
+                {move || if editing_map.get().is_some() {
+                    view! {
+                        <button class="back" on:click=move |_| exit_map()>"← Граф"</button>
+                    }.into_view()
+                } else {
+                    view! {
+                        <A href="/" attr:class="back">"← Проекты"</A>
+                    }.into_view()
+                }}
                 <div class="title">
-                    {move || project.get().map(|p| p.project.name).unwrap_or_default()}
+                    {move || {
+                        let name = project.get().map(|p| p.project.name).unwrap_or_default();
+                        if let Some(map_id) = editing_map.get() {
+                            let map_label = root_nodes.get()
+                                .iter()
+                                .find(|n| n.id == map_id)
+                                .map(|n| kind_label(n.kind))
+                                .unwrap_or("Map");
+                            format!("{} > {}", name, map_label)
+                        } else {
+                            name
+                        }
+                    }}
                 </div>
                 <button on:click=move |_| add_modal_open.set(true)>
                     "Добавить ноду"
@@ -343,7 +436,7 @@ pub fn EditorPage() -> impl IntoView {
                         spawn_local(async move {
                             for (kind, file, pos) in drop_items {
                                 let node_kind = NodeKind::Input(kind);
-                                match project_service::create_node(pid, node_kind, pos).await {
+                                match project_service::create_node(pid, node_kind, pos, None).await {
                                     Ok(out) => {
                                         let node_id = out.node.id;
                                         if let Err(e) = upload_service::upload_file(pid, node_id, kind, file, |_| {}).await {
@@ -446,6 +539,7 @@ pub fn EditorPage() -> impl IntoView {
                             <NodeView
                                 node=node
                                 project_id=pid
+                                nodes=nodes
                                 drag_pos=drag_pos
                                 edges=edges
                                 connecting_from=connecting_from
@@ -455,6 +549,15 @@ pub fn EditorPage() -> impl IntoView {
                                 on_drag_start=start_drag
                                 on_delete=on_delete_node
                                 on_connect_complete=on_connect_complete
+                                on_enter_map=enter_map
+                                on_create_phrase_selector=move |src_node_id: Uuid, phrase: String| {
+                                    placing_phrase.set(Some((src_node_id, phrase)));
+                                    placing_pos.set(None);
+                                }
+                                on_create_reference=move |source_id: Uuid| {
+                                    placing_kind.set(Some(NodeKind::Reference { source: source_id }));
+                                    placing_pos.set(None);
+                                }
                                 on_uploaded=move |updated: Node| {
                                     let copy = updated.clone();
                                     nodes.update(|ns| {
@@ -470,19 +573,38 @@ pub fn EditorPage() -> impl IntoView {
                 />
 
                 {move || {
-                    let kind = placing_kind.get()?;
                     let (cx, cy) = placing_pos.get()?;
-                    let label = kind_label(kind);
-                    Some(view! {
-                        <div
-                            class="node ghost"
-                            style=format!("left: {}px; top: {}px;", cx, cy)
-                        >
-                            <div class="node-header">
-                                <span class="node-kind-badge">{label}</span>
+                    if let Some(kind) = placing_kind.get() {
+                        let label = kind_label(kind);
+                        return Some(view! {
+                            <div
+                                class="node ghost"
+                                style=format!("left: {}px; top: {}px;", cx, cy)
+                            >
+                                <div class="node-header">
+                                    <span class="node-kind-badge">{label}</span>
+                                </div>
                             </div>
-                        </div>
-                    })
+                        }.into_view());
+                    }
+                    if let Some((_, ref phrase)) = placing_phrase.get() {
+                        return Some(view! {
+                            <div
+                                class="node ghost process"
+                                style=format!("left: {}px; top: {}px;", cx, cy)
+                            >
+                                <div class="node-header">
+                                    <span class="node-kind-badge">"Subtitle piece"</span>
+                                </div>
+                                <div class="node-body">
+                                    <div class="phrase-input phrase-found" style="font-size:12px; padding:4px;">
+                                        {phrase.clone()}
+                                    </div>
+                                </div>
+                            </div>
+                        }.into_view());
+                    }
+                    None
                 }}
                 </div>
             </div>
@@ -491,6 +613,7 @@ pub fn EditorPage() -> impl IntoView {
                 <AddNodeModal
                     on_select=on_create_node
                     on_close=move || add_modal_open.set(false)
+                    inside_subgraph=Signal::derive(move || editing_map.get().is_some())
                 />
             </Show>
 
@@ -510,7 +633,7 @@ pub fn EditorPage() -> impl IntoView {
                     let Some(pid) = project_id.get_untracked() else { return };
                     spawn_local(async move {
                         for id in ids {
-                            let _ = project_service::delete_node(pid, id).await;
+                            let _ = project_service::delete_node(pid, id, editing_map.get_untracked()).await;
                         }
                         reload();
                     });
@@ -532,6 +655,7 @@ pub fn EditorPage() -> impl IntoView {
 fn AddNodeModal(
     on_select: impl Fn(NodeKind) + Copy + 'static,
     on_close: impl Fn() + Copy + 'static,
+    inside_subgraph: Signal<bool>,
 ) -> impl IntoView {
     let active_tab = create_rw_signal(0u8);
 
@@ -575,6 +699,16 @@ fn AddNodeModal(
                                 <div class="node-type-icon">"📁"</div>
                                 <div class="node-type-label">"Видео (массив)"</div>
                             </button>
+                            {move || inside_subgraph.get().then(|| view! {
+                                <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::SubgraphInput))>
+                                    <div class="node-type-icon">"➡️"</div>
+                                    <div class="node-type-label">"Вход"</div>
+                                </button>
+                                <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::SubgraphOutput))>
+                                    <div class="node-type-icon">"⬅️"</div>
+                                    <div class="node-type-label">"Выход"</div>
+                                </button>
+                            })}
                             <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Scalar))>
                                 <div class="node-type-icon">"🔢"</div>
                                 <div class="node-type-label">"Число"</div>
@@ -615,6 +749,14 @@ fn AddNodeModal(
                                 <div class="node-type-icon">"💬"</div>
                                 <div class="node-type-label">"Субтитры"</div>
                             </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::AssBuilder))>
+                                <div class="node-type-icon">"📝"</div>
+                                <div class="node-type-label">"ASS субтитры"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::SubtitlePiece))>
+                                <div class="node-type-icon">"🔍"</div>
+                                <div class="node-type-label">"Subtitle piece"</div>
+                            </button>
                             <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Map))>
                                 <div class="node-type-icon">"🔄"</div>
                                 <div class="node-type-label">"Map"</div>
@@ -635,6 +777,18 @@ fn AddNodeModal(
                                 <div class="node-type-icon">"✂️"</div>
                                 <div class="node-type-label">"Обрезка аудио"</div>
                             </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::RemoveBackground))>
+                                <div class="node-type-icon">"✂"</div>
+                                <div class="node-type-label">"Убрать фон"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::ResizeImage))>
+                                <div class="node-type-icon">"📐"</div>
+                                <div class="node-type-label">"Ресайз"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::AddBorder))>
+                                <div class="node-type-icon">"🔲"</div>
+                                <div class="node-type-label">"Обводка"</div>
+                            </button>
                         </div>
                     </Show>
                     <Show when=move || active_tab.get() == 2>
@@ -646,6 +800,10 @@ fn AddNodeModal(
                             <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Mux))>
                                 <div class="node-type-icon">"🎬"</div>
                                 <div class="node-type-label">"Композитор"</div>
+                            </button>
+                            <button class="node-type-card" on:click=move |_| on_select(NodeKind::Process(ProcessNodeKind::Overlay))>
+                                <div class="node-type-icon">"🖼"</div>
+                                <div class="node-type-label">"Оверлей"</div>
                             </button>
                         </div>
                     </Show>
@@ -667,6 +825,7 @@ fn next_position(existing: &[Node]) -> Position {
 fn NodeView(
     node: Node,
     project_id: Uuid,
+    nodes: RwSignal<Vec<Node>>,
     drag_pos: RwSignal<Option<(Uuid, Position)>>,
     edges: RwSignal<Vec<Edge>>,
     connecting_from: RwSignal<Option<Uuid>>,
@@ -676,6 +835,9 @@ fn NodeView(
     on_drag_start: impl Fn(Uuid, MouseEvent) + Copy + 'static,
     on_delete: impl Fn(Uuid) + Copy + 'static,
     on_connect_complete: impl Fn(Uuid, String, Uuid, String) + Copy + 'static,
+    on_enter_map: impl Fn(Uuid) + Copy + 'static,
+    on_create_phrase_selector: impl Fn(Uuid, String) + Copy + 'static,
+    on_create_reference: impl Fn(Uuid) + Copy + 'static,
     on_uploaded: impl Fn(Node) + Copy + 'static,
     on_upload_error: impl Fn(String) + Copy + 'static,
 ) -> impl IntoView {
@@ -726,6 +888,7 @@ fn NodeView(
     let id_for_drag = node_signal.with_untracked(|n| n.id);
 
     let is_process = matches!(node_signal.get_untracked().kind, NodeKind::Process(_));
+    let is_reference = matches!(node_signal.get_untracked().kind, NodeKind::Reference { .. });
     let has_multi_inputs = {
         let n = node_signal.get_untracked();
         if let NodeKind::Process(pk) = n.kind {
@@ -764,7 +927,9 @@ fn NodeView(
     view! {
         <div
             class=move || {
-                let mut cls = if is_process { "node process".to_string() } else { "node".to_string() };
+                let mut cls = if is_reference { "node reference".to_string() }
+                    else if is_process { "node process".to_string() }
+                    else { "node".to_string() };
                 if has_multi_inputs { cls.push_str(" multi-inputs"); }
                 if has_multi_outputs { cls.push_str(" multi-outputs"); }
                 cls
@@ -826,34 +991,6 @@ fn NodeView(
                                     </div>
                                 }
                             }).collect_view()}
-                            {matches!(pk, ProcessNodeKind::Mux).then(|| {
-                                let cur_clips = match &node_signal.get_untracked().settings {
-                                    Some(api_types::NodeSettings::Mux { num_clips, .. }) => *num_clips,
-                                    _ => 1,
-                                };
-                                let cur_fps = match &node_signal.get_untracked().settings {
-                                    Some(api_types::NodeSettings::Mux { fps, .. }) => *fps,
-                                    _ => 30,
-                                };
-                                view! {
-                                    <div
-                                        class="add-port-btn"
-                                        on:click=move |ev: MouseEvent| {
-                                            ev.stop_propagation();
-                                            let new_n = cur_clips + 1;
-                                            let settings = api_types::NodeSettings::Mux { num_clips: new_n, fps: cur_fps };
-                                            node_signal.update(|n| n.settings = Some(settings.clone()));
-                                            spawn_local(async move {
-                                                let _ = project_service::update_node_settings(
-                                                    project_id, id_for_drag, settings
-                                                ).await;
-                                            });
-                                        }
-                                    >
-                                        "+"
-                                    </div>
-                                }
-                            })}
                         </div>
                     }.into_view()
                 }
@@ -865,7 +1002,19 @@ fn NodeView(
                     on_drag_start(id_for_drag, ev);
                 }
             >
-                <span class="node-kind-badge">{move || kind_label(node_signal.get().kind)}</span>
+                <span class="node-kind-badge">{move || {
+                    let n = node_signal.get();
+                    if let NodeKind::Reference { source } = n.kind {
+                        let src_label = nodes.with(|ns| {
+                            ns.iter().find(|n| n.id == source)
+                                .map(|n| kind_label(n.kind))
+                                .unwrap_or("?")
+                        });
+                        format!("& {}", src_label)
+                    } else {
+                        kind_label(n.kind).to_string()
+                    }
+                }}</span>
                 <div class="spacer"></div>
                 {is_process.then(|| view! {
                     <button class="header-btn refresh" title="Принудительно пересчитать"
@@ -888,6 +1037,14 @@ fn NodeView(
                             });
                         }
                     >"↻"</button>
+                })}
+                {(!matches!(node_signal.get_untracked().kind, NodeKind::Reference { .. })).then(|| view! {
+                    <button class="header-btn" title="Создать ссылку"
+                        on:click=move |ev: MouseEvent| {
+                            ev.stop_propagation();
+                            on_create_reference(id_for_drag);
+                        }
+                    >"&"</button>
                 })}
                 <div style="position: relative;">
                     <button class="header-btn delete" on:click=move |ev: MouseEvent| {
@@ -987,6 +1144,416 @@ fn NodeView(
                                     }
                                 },
                             }
+                        }
+                        NodeKind::Process(ProcessNodeKind::Map) => {
+                            let nid = n.id;
+                            let sg_count = n.subgraph.as_ref().map(|sg| sg.nodes.len()).unwrap_or(0);
+                            view! {
+                                <div class="map-body">
+                                    <div class="map-info">{format!("{} нод внутри", sg_count)}</div>
+                                    <button class="run-btn" style="background: var(--accent);"
+                                        on:click=move |_| on_enter_map(nid)
+                                    >"Открыть"</button>
+                                </div>
+                            }.into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::SubtitlePiece) => {
+                            let phrase_sig = Signal::derive(move || {
+                                match &node_signal.get().settings {
+                                    Some(api_types::NodeSettings::SubtitlePiece { phrase, .. }) => phrase.clone(),
+                                    _ => String::new(),
+                                }
+                            });
+                            let occ_sig = Signal::derive(move || {
+                                match &node_signal.get().settings {
+                                    Some(api_types::NodeSettings::SubtitlePiece { occurrence, .. }) => *occurrence,
+                                    _ => 0,
+                                }
+                            });
+                            let input_class = Signal::derive(move || {
+                                let n = node_signal.get();
+                                if matches!(n.task_status, Some(TaskStatus::Failed)) {
+                                    "phrase-input phrase-error"
+                                } else if n.output.is_some() {
+                                    "phrase-input phrase-found"
+                                } else {
+                                    "phrase-input"
+                                }
+                            });
+                            let save_phrase = move |p: String| {
+                                let occ = occ_sig.get_untracked();
+                                let settings = api_types::NodeSettings::SubtitlePiece { phrase: p, occurrence: occ };
+                                node_signal.update(|n| n.settings = Some(settings.clone()));
+                                spawn_local(async move {
+                                    let _ = project_service::update_node_settings(project_id, id_for_drag, settings).await;
+                                    let _ = project_service::run_node(project_id, id_for_drag).await;
+                                });
+                            };
+                            view! {
+                                <input type="text" class=input_class
+                                    prop:value=move || phrase_sig.get()
+                                    on:change=move |ev| {
+                                        save_phrase(event_target_value(&ev).trim().to_string());
+                                    }
+                                    on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            ev.target().unwrap().unchecked_ref::<web_sys::HtmlElement>().blur().ok();
+                                        }
+                                    }
+                                />
+                                {move || {
+                                    let n = node_signal.get();
+                                    match n.task_status {
+                                        Some(TaskStatus::Running { .. }) => view! {
+                                            <div class="process-hint">"Поиск..."</div>
+                                        }.into_view(),
+                                        _ => ().into_view(),
+                                    }
+                                }}
+                            }.into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::Overlay) => {
+                            let kfs = match &n.settings {
+                                Some(api_types::NodeSettings::Overlay { keyframes }) => keyframes.clone(),
+                                _ => Vec::new(),
+                            };
+                            let keyframes = create_rw_signal(kfs);
+                            let editing_idx = create_rw_signal::<Option<usize>>(None);
+                            let overlay_node_id = n.id;
+
+                            let find_connected = move |port: &str| -> Option<(Uuid, String, Option<f64>)> {
+                                let es = edges.get();
+                                let ns = nodes.get();
+                                let port = port.to_string();
+                                es.iter()
+                                    .find(|e| e.to_node == overlay_node_id && e.to_port == port)
+                                    .and_then(|e| {
+                                        let src = ns.iter().find(|n| n.id == e.from_node)?;
+                                        let resolved = match src.kind {
+                                            NodeKind::Reference { source } =>
+                                                api_types::resolve_reference(&ns, source)?,
+                                            _ => src,
+                                        };
+                                        let slug = match resolved.kind {
+                                            NodeKind::Input(ik) => ik.url_slug().to_string(),
+                                            NodeKind::Process(pk) => pk.url_slug().to_string(),
+                                            _ => return None,
+                                        };
+                                        let dur = resolved.asset.as_ref()
+                                            .and_then(|a| a.duration_secs);
+                                        Some((resolved.id, slug, dur))
+                                    })
+                            };
+
+                            let save_kfs = move || {
+                                let kfs = keyframes.get_untracked();
+                                let settings = api_types::NodeSettings::Overlay { keyframes: kfs };
+                                spawn_local(async move {
+                                    let _ = project_service::update_node_settings(project_id, id_for_drag, settings).await;
+                                });
+                            };
+
+                            view! {
+                                <div class="overlay-editor"
+                                    on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                                    on:mousemove=|ev: MouseEvent| ev.stop_propagation()
+                                >
+                                    {move || {
+                                        let kfs = keyframes.get();
+                                        if kfs.is_empty() {
+                                            view! { <div class="overlay-empty">"Запустите ноду для загрузки точек"</div> }.into_view()
+                                        } else {
+                                            let bg_info = find_connected("background");
+                                            let img_info = find_connected("image");
+                                            let img_url: Option<String> = img_info.map(|(id, slug, _)| {
+                                                absolute_url(&format!(
+                                                    "/api/projects/{}/nodes/{}/{}/file",
+                                                    project_id, slug, id
+                                                ))
+                                            });
+                                            let bg_stored = store_value(bg_info);
+                                            let img_stored = store_value(img_url);
+                                            let total = kfs.len();
+                                            kfs.into_iter().enumerate().map(move |(i, kf)| {
+                                                let interp_label = match kf.interpolation {
+                                                    api_types::Interpolation::Linear => "linear",
+                                                    api_types::Interpolation::EaseIn => "ease-in",
+                                                    api_types::Interpolation::EaseOut => "ease-out",
+                                                    api_types::Interpolation::EaseInOut => "ease-in-out",
+                                                    api_types::Interpolation::Step => "step",
+                                                    api_types::Interpolation::CatmullRom => "smooth",
+                                                };
+                                                let has_next = i + 1 < total;
+                                                view! {
+                                                    <div class="overlay-kf-row"
+                                                        class:active=move || editing_idx.get() == Some(i)
+                                                        on:click=move |_| {
+                                                            editing_idx.set(if editing_idx.get_untracked() == Some(i) { None } else { Some(i) });
+                                                        }
+                                                    >
+                                                        <span class="overlay-kf-time">{format!("{:.0}ms", kf.t_ms)}</span>
+                                                        <span class="overlay-kf-summary">{format!("x:{:.2} y:{:.2} s:{:.1} a:{:.1}", kf.x, kf.y, kf.scale, kf.alpha)}</span>
+                                                    </div>
+                                                    <Show when=move || editing_idx.get() == Some(i)>
+                                                        <OverlayKfEditor
+                                                            index=i
+                                                            keyframes=keyframes
+                                                            bg_info=bg_stored.get_value()
+                                                            image_url=img_stored.get_value()
+                                                            project_id=project_id
+                                                            on_change=save_kfs
+                                                        />
+                                                    </Show>
+                                                    {has_next.then(move || {
+                                                        view! {
+                                                            <div class="overlay-transition"
+                                                                on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                                                            >
+                                                                <span class="overlay-transition-arrow">"↕"</span>
+                                                                <select class="overlay-interp-select"
+                                                                    on:change=move |ev| {
+                                                                        let v = event_target_value(&ev);
+                                                                        let interp = match v.as_str() {
+                                                                            "Linear" => api_types::Interpolation::Linear,
+                                                                            "EaseIn" => api_types::Interpolation::EaseIn,
+                                                                            "EaseOut" => api_types::Interpolation::EaseOut,
+                                                                            "EaseInOut" => api_types::Interpolation::EaseInOut,
+                                                                            "Step" => api_types::Interpolation::Step,
+                                                                            _ => api_types::Interpolation::Linear,
+                                                                        };
+                                                                        keyframes.update(|kfs| {
+                                                                            if let Some(kf) = kfs.get_mut(i) {
+                                                                                kf.interpolation = interp;
+                                                                            }
+                                                                        });
+                                                                        save_kfs();
+                                                                    }
+                                                                >
+                                                                    <option value="Linear" selected=interp_label == "linear">"Linear"</option>
+                                                                    <option value="EaseIn" selected=interp_label == "ease-in">"Ease In"</option>
+                                                                    <option value="EaseOut" selected=interp_label == "ease-out">"Ease Out"</option>
+                                                                    <option value="EaseInOut" selected=interp_label == "ease-in-out">"Ease In/Out"</option>
+                                                                    <option value="Step" selected=interp_label == "step">"Step"</option>
+                                                                </select>
+                                                            </div>
+                                                        }
+                                                    })}
+                                                }
+                                            }).collect_view()
+                                        }
+                                    }}
+                                    <OverlayPreviewAnim
+                                        keyframes=keyframes
+                                        bg_info=find_connected("background")
+                                        image_url={
+                                            let img = find_connected("image");
+                                            img.map(|(id, slug, _)| absolute_url(&format!(
+                                                "/api/projects/{}/nodes/{}/{}/file",
+                                                project_id, slug, id
+                                            )))
+                                        }
+                                        project_id=project_id
+                                    />
+                                </div>
+                            }.into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::RemoveBackground) => {
+                            let current_prompt = match &n.settings {
+                                Some(api_types::NodeSettings::RemoveBackground { prompt }) => prompt.clone(),
+                                _ => String::new(),
+                            };
+                            let nid = n.id;
+                            let prompt_sig = Signal::derive(move || {
+                                match &node_signal.get().settings {
+                                    Some(api_types::NodeSettings::RemoveBackground { prompt }) => prompt.clone(),
+                                    _ => String::new(),
+                                }
+                            });
+                            let save_prompt = move |p: String| {
+                                let settings = api_types::NodeSettings::RemoveBackground { prompt: p.clone() };
+                                node_signal.update(|n| n.settings = Some(settings.clone()));
+                                spawn_local(async move {
+                                    let _ = project_service::update_node_settings(project_id, id_for_drag, settings).await;
+                                });
+                            };
+                            view! {
+                                <input type="text" class="phrase-input"
+                                    placeholder="fish, green leaf..."
+                                    prop:value=move || prompt_sig.get()
+                                    on:change=move |ev| {
+                                        save_prompt(event_target_value(&ev).trim().to_string());
+                                    }
+                                    on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            ev.target().unwrap().unchecked_ref::<web_sys::HtmlElement>().blur().ok();
+                                        }
+                                    }
+                                />
+                                {move || {
+                                    let ns = node_signal.get();
+                                    match &ns.task_status {
+                                        Some(TaskStatus::Queued) => view! {
+                                            <div class="rembg-status">"В очереди..."</div>
+                                        }.into_view(),
+                                        Some(TaskStatus::Running { progress_pct }) => view! {
+                                            <div class="rembg-status">
+                                                <div class="rembg-progress-bar">
+                                                    <div class="rembg-progress-fill" style=format!("width:{}%", progress_pct)></div>
+                                                </div>
+                                                "Обработка..."
+                                            </div>
+                                        }.into_view(),
+                                        Some(TaskStatus::Failed) => view! {
+                                            <div class="rembg-status error">"Ошибка"</div>
+                                        }.into_view(),
+                                        _ => {
+                                            if let Some(output) = &ns.output {
+                                                let url = absolute_url(&format!(
+                                                    "/api/projects/{}/nodes/{}/{}/file?t={}",
+                                                    project_id, ProcessNodeKind::RemoveBackground.url_slug(), nid, output.size_bytes
+                                                ));
+                                                view! {
+                                                    <img class="rembg-preview" src=url draggable="false" />
+                                                }.into_view()
+                                            } else {
+                                                ().into_view()
+                                            }
+                                        }
+                                    }
+                                }}
+                            }.into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::ResizeImage) => {
+                            let nid = n.id;
+                            let w_sig = Signal::derive(move || match &node_signal.get().settings {
+                                Some(api_types::NodeSettings::ResizeImage { width, .. }) => *width,
+                                _ => 1920,
+                            });
+                            let h_sig = Signal::derive(move || match &node_signal.get().settings {
+                                Some(api_types::NodeSettings::ResizeImage { height, .. }) => *height,
+                                _ => 1080,
+                            });
+                            let save_resize = move |w: u32, h: u32| {
+                                let settings = api_types::NodeSettings::ResizeImage { width: w, height: h };
+                                node_signal.update(|n| n.settings = Some(settings.clone()));
+                                spawn_local(async move {
+                                    let _ = project_service::update_node_settings(project_id, id_for_drag, settings).await;
+                                });
+                            };
+                            view! {
+                                <div class="overlay-xy-row" style="margin:4px 0;"
+                                    on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                                >
+                                    <label class="overlay-xy-field">
+                                        <span>"W"</span>
+                                        <input type="text" prop:value=move || format!("{}", w_sig.get())
+                                            on:change=move |ev| {
+                                                let w = event_target_value(&ev).parse::<u32>().unwrap_or(1920);
+                                                save_resize(w, h_sig.get_untracked());
+                                            }
+                                        />
+                                    </label>
+                                    <label class="overlay-xy-field">
+                                        <span>"H"</span>
+                                        <input type="text" prop:value=move || format!("{}", h_sig.get())
+                                            on:change=move |ev| {
+                                                let h = event_target_value(&ev).parse::<u32>().unwrap_or(1080);
+                                                save_resize(w_sig.get_untracked(), h);
+                                            }
+                                        />
+                                    </label>
+                                </div>
+                                {move || {
+                                    let ns = node_signal.get();
+                                    if let Some(output) = &ns.output {
+                                        let url = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/file?t={}",
+                                            project_id, ProcessNodeKind::ResizeImage.url_slug(), nid, output.size_bytes
+                                        ));
+                                        view! { <img class="rembg-preview" src=url draggable="false" /> }.into_view()
+                                    } else {
+                                        ().into_view()
+                                    }
+                                }}
+                            }.into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::AddBorder) => {
+                            let nid = n.id;
+                            let color_sig = Signal::derive(move || match &node_signal.get().settings {
+                                Some(api_types::NodeSettings::AddBorder { color, .. }) => color.clone(),
+                                _ => "#FFFFFF".to_string(),
+                            });
+                            let bw_sig = Signal::derive(move || match &node_signal.get().settings {
+                                Some(api_types::NodeSettings::AddBorder { border_width, .. }) => *border_width,
+                                _ => 5,
+                            });
+                            let save_border = move |c: String, w: u32| {
+                                let settings = api_types::NodeSettings::AddBorder { color: c, border_width: w };
+                                node_signal.update(|n| n.settings = Some(settings.clone()));
+                                spawn_local(async move {
+                                    let _ = project_service::update_node_settings(project_id, id_for_drag, settings).await;
+                                });
+                            };
+                            view! {
+                                <div class="overlay-xy-row" style="margin:4px 0;"
+                                    on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                                >
+                                    <label class="overlay-xy-field">
+                                        <span>"color"</span>
+                                        <input type="color" style="width:40px;height:20px;padding:0;border:none;"
+                                            prop:value=move || color_sig.get()
+                                            on:input=move |ev| {
+                                                save_border(event_target_value(&ev), bw_sig.get_untracked());
+                                            }
+                                        />
+                                    </label>
+                                    <label class="overlay-xy-field">
+                                        <span>"px"</span>
+                                        <input type="text" prop:value=move || format!("{}", bw_sig.get())
+                                            on:change=move |ev| {
+                                                let w = event_target_value(&ev).parse::<u32>().unwrap_or(5);
+                                                save_border(color_sig.get_untracked(), w);
+                                            }
+                                        />
+                                    </label>
+                                </div>
+                                {move || {
+                                    let ns = node_signal.get();
+                                    match &ns.task_status {
+                                        Some(TaskStatus::Queued) => view! {
+                                            <div class="rembg-status">"В очереди..."</div>
+                                        }.into_view(),
+                                        Some(TaskStatus::Running { .. }) => view! {
+                                            <div class="rembg-status">
+                                                <div class="rembg-progress-bar">
+                                                    <div class="rembg-progress-fill" style="width:50%"></div>
+                                                </div>
+                                                "Обработка..."
+                                            </div>
+                                        }.into_view(),
+                                        Some(TaskStatus::Failed) => view! {
+                                            <div class="rembg-status error">"Ошибка"</div>
+                                        }.into_view(),
+                                        _ => {
+                                            if let Some(output) = &ns.output {
+                                                let url = absolute_url(&format!(
+                                                    "/api/projects/{}/nodes/{}/{}/file?t={}",
+                                                    project_id, ProcessNodeKind::AddBorder.url_slug(), nid, output.size_bytes
+                                                ));
+                                                view! {
+                                                    <img class="rembg-preview" src=url draggable="false" />
+                                                }.into_view()
+                                            } else {
+                                                ().into_view()
+                                            }
+                                        }
+                                    }
+                                }}
+                            }.into_view()
                         }
                         NodeKind::Process(ProcessNodeKind::Scalar) => {
                             // Inline number editor — no "Обновить" button
@@ -1148,16 +1715,26 @@ fn NodeView(
                                     }
                                     ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
                                     | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => {
-                                        let file_url = absolute_url(&format!(
-                                            "/api/projects/{}/nodes/{}/{}/file",
-                                            project_id, slug, n.id
-                                        ));
+                                        let math_nid = n.id;
+                                        let math_slug = slug.to_string();
                                         let result_val = create_rw_signal("...".to_string());
-                                        {
-                                            let file_url = file_url.clone();
+                                        let last_fetched = create_rw_signal(0_u64);
+                                        create_effect(move |_| {
+                                            let ns = node_signal.get();
+                                            let sz = ns.output.as_ref().map(|o| o.size_bytes).unwrap_or(0);
+                                            if sz == 0 { result_val.set("...".to_string()); return; }
+                                            if sz == last_fetched.get_untracked() { return; }
+                                            last_fetched.set(sz);
+                                            let url = absolute_url(&format!(
+                                                "/api/projects/{}/nodes/{}/{}/file?t={}",
+                                                project_id, math_slug, math_nid, sz
+                                            ));
                                             spawn_local(async move {
                                                 let window = web_sys::window().unwrap();
-                                                if let Ok(resp) = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&file_url)).await {
+                                                let mut opts = web_sys::RequestInit::new();
+                                                opts.cache(web_sys::RequestCache::NoStore);
+                                                let req = web_sys::Request::new_with_str_and_init(&url, &opts).unwrap();
+                                                if let Ok(resp) = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&req)).await {
                                                     let resp: web_sys::Response = resp.unchecked_into();
                                                     if let Ok(text_p) = resp.text() {
                                                         if let Ok(text_v) = wasm_bindgen_futures::JsFuture::from(text_p).await {
@@ -1173,9 +1750,47 @@ fn NodeView(
                                                     }
                                                 }
                                             });
-                                        }
+                                        });
                                         view! {
                                             <div class="math-result">{move || result_val.get()}</div>
+                                        }.into_view()
+                                    }
+                                    ProcessNodeKind::DetectSubtitles => {
+                                        let sz = n.output.as_ref().map(|o| o.size_bytes).unwrap_or(0);
+                                        let json_url = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/file?t={}",
+                                            project_id, slug, n.id, sz
+                                        ));
+                                        let subs_node_id = n.id;
+                                        view! {
+                                            <SubtitlesView
+                                                url=json_url
+                                                project_id=project_id
+                                                node_id=subs_node_id
+                                                editable=true
+                                                on_create_phrase_selector=move |phrase: String| {
+                                                    on_create_phrase_selector(subs_node_id, phrase);
+                                                }
+                                            />
+                                        }.into_view()
+                                    }
+                                    ProcessNodeKind::AssBuilder => {
+                                        let sz = n.output.as_ref().map(|o| o.size_bytes).unwrap_or(0);
+                                        let json_url = absolute_url(&format!(
+                                            "/api/projects/{}/nodes/{}/{}/file?t={}",
+                                            project_id, slug, n.id, sz
+                                        ));
+                                        let subs_node_id = n.id;
+                                        view! {
+                                            <SubtitlesView
+                                                url=json_url
+                                                project_id=project_id
+                                                node_id=subs_node_id
+                                                editable=false
+                                                on_create_phrase_selector=move |phrase: String| {
+                                                    on_create_phrase_selector(subs_node_id, phrase);
+                                                }
+                                            />
                                         }.into_view()
                                     }
                                     _ => {
@@ -1208,12 +1823,20 @@ fn NodeView(
                                 {status_view}
                             }.into_view()
                         }
+                        NodeKind::Reference { .. } => {
+                            let num_ports = n.kind.output_ports_in_graph(&nodes.get()).len();
+                            let h = if num_ports > 1 { num_ports * 20 } else { 0 };
+                            view! {
+                                <div style=format!("min-height: {}px;", h)></div>
+                            }.into_view()
+                        }
                     }
                 }}
             </div>
             {move || {
                 let n = node_signal.get();
                 let ports = match n.kind {
+                    NodeKind::Reference { .. } => n.kind.output_ports_in_graph(&nodes.get()),
                     _ => n.kind.output_ports(),
                 };
                 if ports.len() <= 1 {
@@ -1271,10 +1894,18 @@ fn VideoPlayer(
 ) -> impl IntoView {
     let playing = create_rw_signal(false);
     let playhead_pct = create_rw_signal(0.0_f64);
+    let current_time_ms = create_rw_signal(0.0_f64);
+    let hover_pct = create_rw_signal::<Option<f64>>(None);
+    let hover_time_ms = create_rw_signal(0.0_f64);
+    let full_duration = create_rw_signal(0.0_f64);
     let video_ref = create_node_ref::<html::Video>();
+    let thumb_ref = create_node_ref::<html::Div>();
 
     let selection = create_rw_signal::<Option<(f64, f64)>>(None);
     let selecting_from = create_rw_signal::<Option<f64>>(None);
+
+    let mouse_down_pct = create_rw_signal::<Option<f64>>(None);
+    let did_drag = create_rw_signal(false);
 
     let on_thumb_mousedown = move |ev: MouseEvent| {
         ev.prevent_default();
@@ -1282,28 +1913,58 @@ fn VideoPlayer(
         let el = target.unchecked_ref::<web_sys::HtmlElement>();
         let rect = el.get_bounding_client_rect();
         let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        mouse_down_pct.set(Some(pct));
         selecting_from.set(Some(pct));
+        did_drag.set(false);
         selection.set(None);
-        if playing.get_untracked() {
-            if let Some(v) = video_ref.get_untracked() {
-                let el: &web_sys::HtmlMediaElement = v.unchecked_ref();
-                el.pause().ok();
-                playing.set(false);
+    };
+
+    let on_thumb_mousemove = move |ev: MouseEvent| {
+        if let Some(el) = thumb_ref.get_untracked() {
+            let rect = el.get_bounding_client_rect();
+            let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+
+            // Hover cursor — use full video duration
+            hover_pct.set(Some(pct));
+            let dur = full_duration.get_untracked();
+            if dur > 0.0 {
+                hover_time_ms.set(pct * dur * 1000.0);
+            }
+
+            // Selection drag
+            if let Some(start) = selecting_from.get_untracked() {
+                let (a, b) = if pct < start { (pct, start) } else { (start, pct) };
+                if (b - a) > 0.01 {
+                    selection.set(Some((a, b)));
+                    did_drag.set(true);
+                }
             }
         }
     };
 
-    let on_thumb_mousemove = move |ev: MouseEvent| {
-        let Some(start) = selecting_from.get_untracked() else { return };
-        let target = ev.target().unwrap();
-        let el = target.unchecked_ref::<web_sys::HtmlElement>();
-        let rect = el.get_bounding_client_rect();
-        let pct = ((ev.client_x() as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        let (a, b) = if pct < start { (pct, start) } else { (start, pct) };
-        if (b - a) > 0.01 { selection.set(Some((a, b))); }
+    let on_thumb_mouseup = move |_| {
+        selecting_from.set(None);
+        // Click without drag → seek to position
+        if !did_drag.get_untracked() {
+            if let Some(pct) = mouse_down_pct.get_untracked() {
+                if let Some(v) = video_ref.get_untracked() {
+                    let el: &web_sys::HtmlMediaElement = v.unchecked_ref();
+                    let dur = el.duration();
+                    if dur.is_finite() && dur > 0.0 {
+                        el.set_current_time(pct * dur);
+                        playhead_pct.set(pct * 100.0);
+                        current_time_ms.set(pct * dur * 1000.0);
+                        // Pause if playing
+                        if playing.get_untracked() {
+                            el.pause().ok();
+                            playing.set(false);
+                        }
+                    }
+                }
+            }
+        }
+        mouse_down_pct.set(None);
     };
-
-    let on_thumb_mouseup = move |_| { selecting_from.set(None); };
 
     let toggle = {
         let file_url = file_url.clone();
@@ -1347,9 +2008,12 @@ fn VideoPlayer(
         let cur = el.current_time();
         if dur.is_finite() && dur > 0.0 {
             if let Some((a, b)) = selection.get_untracked() {
+                let abs_t = a * dur + cur;
                 playhead_pct.set((a + (cur / dur) * (b - a)) * 100.0);
+                current_time_ms.set(abs_t * 1000.0);
             } else {
                 playhead_pct.set(cur / dur * 100.0);
+                current_time_ms.set(cur * 1000.0);
             }
         }
     };
@@ -1372,10 +2036,14 @@ fn VideoPlayer(
         <div class="video-player" class:playing=move || playing.get()>
             <div
                 class="video-thumb-wrap"
+                node_ref=thumb_ref
                 on:mousedown=on_thumb_mousedown
                 on:mousemove=on_thumb_mousemove
                 on:mouseup=on_thumb_mouseup
-                on:mouseleave=move |_| selecting_from.set(None)
+                on:mouseleave=move |_| {
+                    selecting_from.set(None);
+                    hover_pct.set(None);
+                }
             >
                 <video
                     node_ref=video_ref
@@ -1385,11 +2053,27 @@ fn VideoPlayer(
                     preload="metadata"
                     on:timeupdate=on_timeupdate
                     on:ended=on_ended
+                    on:loadedmetadata=move |_| {
+                        if let Some(v) = video_ref.get_untracked() {
+                            let el: &web_sys::HtmlMediaElement = v.unchecked_ref();
+                            let dur = el.duration();
+                            if dur.is_finite() && dur > 0.0 && full_duration.get_untracked() == 0.0 {
+                                full_duration.set(dur);
+                            }
+                        }
+                    }
                 />
                 {move || selection.get().map(|(a, b)| {
                     let left = format!("{:.2}%", a * 100.0);
                     let width = format!("{:.2}%", (b - a) * 100.0);
                     view! { <div class="selection-highlight" style:left=left style:width=width></div> }
+                })}
+                {move || hover_pct.get().map(|pct| {
+                    view! {
+                        <div class="hover-cursor" style=format!("left:{:.2}%", pct * 100.0)>
+                            <span class="hover-time">{format!("{:.0}ms", hover_time_ms.get())}</span>
+                        </div>
+                    }
                 })}
                 <div class="playhead" style=move || format!("left: {:.2}%;", playhead_pct.get())></div>
             </div>
@@ -1889,6 +2573,194 @@ fn NodeListModal(
 }
 
 #[component]
+fn SubtitlesView(
+    url: String,
+    project_id: Uuid,
+    node_id: Uuid,
+    #[prop(default = false)] editable: bool,
+    on_create_phrase_selector: impl Fn(String) + Copy + 'static,
+) -> impl IntoView {
+    let expanded = create_rw_signal(false);
+    let words = create_rw_signal::<Vec<(String, f64, f64)>>(Vec::new());
+    let raw_text = create_rw_signal(String::new());
+    let loaded = create_rw_signal(false);
+    let selection_text = create_rw_signal::<Option<String>>(None);
+    let editing = create_rw_signal(false);
+    let edit_content = create_rw_signal(String::new());
+    let dirty = create_rw_signal(false);
+
+    let load_data = {
+        let url = url.clone();
+        move || {
+            if loaded.get_untracked() { return; }
+            let url = url.clone();
+            spawn_local(async move {
+                let window = web_sys::window().unwrap();
+                let mut opts = web_sys::RequestInit::new();
+                opts.cache(web_sys::RequestCache::NoStore);
+                let request = web_sys::Request::new_with_str_and_init(&url, &opts).unwrap();
+                if let Ok(resp) = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await {
+                    let resp: web_sys::Response = resp.unchecked_into();
+                    if let Ok(text_p) = resp.text() {
+                        if let Ok(text_v) = wasm_bindgen_futures::JsFuture::from(text_p).await {
+                            if let Some(s) = text_v.as_string() {
+                                raw_text.set(s.clone());
+                                let parsed: Vec<(String, f64, f64)> = if let Ok(arr) = js_sys::JSON::parse(&s) {
+                                    let arr = if let Ok(segs) = js_sys::Reflect::get(&arr, &"segments".into()) {
+                                        if segs.is_undefined() { arr } else { segs }
+                                    } else { arr };
+                                    if let Some(js_arr) = arr.dyn_ref::<js_sys::Array>() {
+                                        (0..js_arr.length()).filter_map(|i| {
+                                            let item = js_arr.get(i);
+                                            let text = js_sys::Reflect::get(&item, &"text".into()).ok()?.as_string()?;
+                                            let start = js_sys::Reflect::get(&item, &"start_ms".into()).ok()?.as_f64()?;
+                                            let end = js_sys::Reflect::get(&item, &"end_ms".into()).ok()?.as_f64()?;
+                                            let text = text.trim().to_string();
+                                            if text.is_empty() { None } else { Some((text, start, end)) }
+                                        }).collect()
+                                    } else { Vec::new() }
+                                } else { Vec::new() };
+                                words.set(parsed);
+                                loaded.set(true);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    };
+
+    let toggle = move |_| {
+        let new_val = !expanded.get_untracked();
+        expanded.set(new_val);
+        if new_val { load_data(); }
+    };
+
+    let check_selection = move |_| {
+        if let Some(window) = web_sys::window() {
+            if let Ok(Some(sel)) = window.get_selection() {
+                let sel_str: String = sel.to_string().into();
+                let text = sel_str.trim().to_string();
+                if text.is_empty() {
+                    selection_text.set(None);
+                } else {
+                    selection_text.set(Some(text));
+                }
+            }
+        }
+    };
+
+    let start_editing = move |_: MouseEvent| {
+        edit_content.set(raw_text.get_untracked());
+        editing.set(true);
+        dirty.set(false);
+    };
+
+    let save_edit = move |_: MouseEvent| {
+        let c = edit_content.get_untracked();
+        let settings = api_types::NodeSettings::DetectSubtitles {
+            model: "small".to_string(),
+            corrected_content: c.clone(),
+        };
+        // Update local state immediately so re-edit shows saved content
+        raw_text.set(c.clone());
+        // Re-parse words from saved content
+        let parsed: Vec<(String, f64, f64)> = if let Ok(arr) = js_sys::JSON::parse(&c) {
+            let arr = if let Ok(segs) = js_sys::Reflect::get(&arr, &"segments".into()) {
+                if segs.is_undefined() { arr } else { segs }
+            } else { arr };
+            if let Some(js_arr) = arr.dyn_ref::<js_sys::Array>() {
+                (0..js_arr.length()).filter_map(|i| {
+                    let item = js_arr.get(i);
+                    let text = js_sys::Reflect::get(&item, &"text".into()).ok()?.as_string()?;
+                    let start = js_sys::Reflect::get(&item, &"start_ms".into()).ok()?.as_f64()?;
+                    let end = js_sys::Reflect::get(&item, &"end_ms".into()).ok()?.as_f64()?;
+                    let text = text.trim().to_string();
+                    if text.is_empty() { None } else { Some((text, start, end)) }
+                }).collect()
+            } else { Vec::new() }
+        } else { Vec::new() };
+        words.set(parsed);
+        dirty.set(false);
+        editing.set(false);
+        spawn_local(async move {
+            let _ = project_service::update_node_settings(project_id, node_id, settings).await;
+            let _ = project_service::run_node(project_id, node_id).await;
+        });
+    };
+
+    let cancel_edit = move |_: MouseEvent| {
+        editing.set(false);
+        dirty.set(false);
+    };
+
+    view! {
+        <div class="subs-view">
+            <button class="subs-toggle" on:click=toggle>
+                {move || if expanded.get() { "▾ Скрыть" } else { "▸ Показать" }}
+            </button>
+            <Show when=move || expanded.get()>
+                <Show when=move || editing.get()>
+                    <textarea
+                        class="spell-textarea"
+                        prop:value=move || edit_content.get()
+                        on:input=move |ev| {
+                            edit_content.set(event_target_value(&ev));
+                            dirty.set(true);
+                        }
+                        on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                        on:mousemove=|ev: MouseEvent| ev.stop_propagation()
+                    />
+                    <div class="subs-edit-buttons">
+                        <button class="run-btn" on:click=save_edit>"Сохранить"</button>
+                        <button class="run-btn" style="background: var(--border);" on:click=cancel_edit>"Отмена"</button>
+                    </div>
+                </Show>
+                <Show when=move || !editing.get()>
+                    <div class="subs-words"
+                        on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                        on:mousemove=|ev: MouseEvent| ev.stop_propagation()
+                        on:mouseup=move |ev: MouseEvent| {
+                            ev.stop_propagation();
+                            check_selection(ev);
+                        }
+                    >
+                        {move || words.get().into_iter().map(|(text, _start, _end)| {
+                            view! {
+                                <span class="sub-word">{text}</span>
+                                {" "}
+                            }
+                        }).collect_view()}
+                    </div>
+                    {move || selection_text.get().map(|text| {
+                        let phrase = text.clone();
+                        view! {
+                            <div class="subs-selection-tooltip">
+                                <span class="subs-selection-text">{format!("\"{}\"", &text)}</span>
+                                <button class="subs-create-phrase" on:click=move |ev: MouseEvent| {
+                                    ev.stop_propagation();
+                                    on_create_phrase_selector(phrase.clone());
+                                    selection_text.set(None);
+                                }>
+                                    "🔍 Subtitle piece"
+                                </button>
+                            </div>
+                        }
+                    })}
+                    {if editable {
+                        Some(view! {
+                            <button class="run-btn" style="margin-top: 4px;" on:click=start_editing>"✏ Редактировать"</button>
+                        })
+                    } else {
+                        None
+                    }}
+                </Show>
+            </Show>
+        </div>
+    }
+}
+
+#[component]
 fn JsonModal(
     url: String,
     label: &'static str,
@@ -1931,6 +2803,440 @@ fn JsonModal(
     }
 }
 
+#[component]
+fn OverlayPreviewAnim(
+    keyframes: RwSignal<Vec<api_types::OverlayKeyframe>>,
+    bg_info: Option<(Uuid, String, Option<f64>)>,
+    image_url: Option<String>,
+    project_id: Uuid,
+) -> impl IntoView {
+    let playing = create_rw_signal(false);
+    let anim_t = create_rw_signal(0.0_f64); // 0..1 normalized progress
+
+    let start_anim = move |_: MouseEvent| {
+        if playing.get_untracked() { return; }
+        let kfs = keyframes.get_untracked();
+        if kfs.len() < 2 { return; }
+        let t_start = kfs.first().unwrap().t_ms;
+        let t_end = kfs.last().unwrap().t_ms;
+        let duration_ms = t_end - t_start;
+        if duration_ms <= 0.0 { return; }
+
+        // Resume from current position
+        let start_t = anim_t.get_untracked();
+        playing.set(true);
+
+        spawn_local(async move {
+            let perf = web_sys::window().unwrap().performance().unwrap();
+            let start_wall = perf.now();
+            loop {
+                if !playing.get_untracked() { break; }
+                let elapsed = perf.now() - start_wall;
+                let t = (start_t + elapsed / duration_ms).min(1.0);
+                anim_t.set(t);
+                if t >= 1.0 { playing.set(false); break; }
+                wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut |resolve, _| {
+                    web_sys::window().unwrap()
+                        .request_animation_frame(&resolve).ok();
+                })).await.ok();
+            }
+        });
+    };
+
+    // Interpolate value between keyframes at normalized t
+    let interp_val = move |t: f64, get_val: fn(&api_types::OverlayKeyframe) -> f64| -> f64 {
+        let kfs = keyframes.get();
+        if kfs.is_empty() { return 0.0; }
+        if kfs.len() == 1 { return get_val(&kfs[0]); }
+        let t_start = kfs.first().unwrap().t_ms;
+        let t_end = kfs.last().unwrap().t_ms;
+        let dur = t_end - t_start;
+        if dur <= 0.0 { return get_val(&kfs[0]); }
+        let abs_t = t_start + t * dur;
+
+        // Find segment
+        let mut i = 0;
+        while i + 1 < kfs.len() && kfs[i + 1].t_ms < abs_t { i += 1; }
+        if i + 1 >= kfs.len() { return get_val(&kfs[kfs.len() - 1]); }
+
+        let k0 = &kfs[i];
+        let k1 = &kfs[i + 1];
+        let seg_dur = k1.t_ms - k0.t_ms;
+        let seg_t = if seg_dur > 0.0 { ((abs_t - k0.t_ms) / seg_dur).clamp(0.0, 1.0) } else { 0.0 };
+
+        let eased = match k0.interpolation {
+            api_types::Interpolation::Step => 0.0,
+            api_types::Interpolation::Linear => seg_t,
+            api_types::Interpolation::EaseIn => seg_t * seg_t,
+            api_types::Interpolation::EaseOut => 1.0 - (1.0 - seg_t) * (1.0 - seg_t),
+            api_types::Interpolation::EaseInOut => {
+                if seg_t < 0.5 { 2.0 * seg_t * seg_t } else { 1.0 - (-2.0 * seg_t + 2.0_f64).powi(2) / 2.0 }
+            }
+            api_types::Interpolation::CatmullRom => seg_t,
+        };
+        let v0 = get_val(k0);
+        let v1 = get_val(k1);
+        if matches!(k0.interpolation, api_types::Interpolation::Step) { v0 } else { v0 + (v1 - v0) * eased }
+    };
+
+    // Background frame (middle of animation)
+    let bg_url = bg_info.as_ref().map(|(id, slug, dur)| {
+        let kfs = keyframes.get_untracked();
+        let mid_t = if kfs.len() >= 2 {
+            let t0 = kfs.first().unwrap().t_ms;
+            let t1 = kfs.last().unwrap().t_ms;
+            (t0 + t1) / 2.0
+        } else { 0.0 };
+        let t_norm = if let Some(d) = dur {
+            if *d > 0.0 { (mid_t / 1000.0 / d).clamp(0.0, 1.0) as f32 } else { 0.0 }
+        } else { 0.0 };
+        absolute_url(&format!(
+            "/api/projects/{}/nodes/{}/{}/thumbnail?t={}&w=640",
+            project_id, slug, id, t_norm
+        ))
+    });
+
+    let preview_open = create_rw_signal(false);
+    let scrubbing = create_rw_signal(false);
+    let bar_ref = create_node_ref::<leptos::html::Div>();
+
+    let toggle_preview = move |ev: MouseEvent| {
+        ev.stop_propagation();
+        let open = !preview_open.get_untracked();
+        preview_open.set(open);
+        if !open { playing.set(false); }
+    };
+
+    let toggle_play = move |ev: MouseEvent| {
+        ev.stop_propagation();
+        if playing.get_untracked() {
+            playing.set(false);
+        } else {
+            start_anim(ev);
+        }
+    };
+
+    let scrub_to = move |client_x: i32| {
+        if let Some(el) = bar_ref.get_untracked() {
+            let rect = el.get_bounding_client_rect();
+            let t = ((client_x as f64 - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            playing.set(false);
+            anim_t.set(t);
+        }
+    };
+
+    view! {
+        <button class="overlay-preview-btn"
+            on:click=toggle_preview
+            on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+        >
+            {move || if preview_open.get() { "▾ Preview" } else { "▸ Preview" }}
+        </button>
+        <Show when=move || preview_open.get()>
+            <div class="overlay-preview" style="min-height:120px;">
+                {bg_url.clone().map(|url| view! {
+                    <img class="overlay-bg-frame" src=url draggable="false" />
+                })}
+                {image_url.clone().map(|url| view! {
+                    <img class="overlay-img-preview" src=url draggable="false"
+                        style=move || {
+                            let t = anim_t.get();
+                            let x = interp_val(t, |k| k.x) * 100.0;
+                            let y = interp_val(t, |k| k.y) * 100.0;
+                            let s = interp_val(t, |k| k.scale) * 100.0;
+                            let a = interp_val(t, |k| k.alpha);
+                            let r = interp_val(t, |k| k.corner_radius);
+                            format!(
+                                "left:{:.1}%;top:{:.1}%;width:{:.1}%;transform:translate(-50%,-50%);opacity:{:.2};border-radius:{:.1}px;",
+                                x, y, s, a, r
+                            )
+                        }
+                    />
+                })}
+            </div>
+            <div class="overlay-anim-controls">
+                <button class="overlay-play-btn"
+                    on:click=toggle_play
+                    on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                >
+                    {move || if playing.get() { "⏸" } else { "⏵" }}
+                </button>
+                <div class="overlay-anim-bar"
+                    node_ref=bar_ref
+                    on:mousedown=move |ev: MouseEvent| {
+                        ev.stop_propagation();
+                        ev.prevent_default();
+                        scrubbing.set(true);
+                        scrub_to(ev.client_x());
+                    }
+                    on:mousemove=move |ev: MouseEvent| {
+                        if scrubbing.get_untracked() {
+                            scrub_to(ev.client_x());
+                        }
+                    }
+                    on:mouseup=move |_| scrubbing.set(false)
+                    on:mouseleave=move |_| scrubbing.set(false)
+                >
+                    <div class="overlay-anim-fill" style=move || format!("width:{:.1}%", anim_t.get() * 100.0)></div>
+                    <div class="overlay-anim-thumb" style=move || format!("left:{:.1}%", anim_t.get() * 100.0)></div>
+                </div>
+                <span class="overlay-anim-time">{move || {
+                    let kfs = keyframes.get();
+                    if kfs.len() >= 2 {
+                        let t0 = kfs.first().unwrap().t_ms;
+                        let t1 = kfs.last().unwrap().t_ms;
+                        let cur = t0 + anim_t.get() * (t1 - t0);
+                        format!("{:.0}ms", cur)
+                    } else {
+                        String::new()
+                    }
+                }}</span>
+            </div>
+        </Show>
+    }
+}
+
+#[component]
+fn OverlayKfEditor(
+    index: usize,
+    keyframes: RwSignal<Vec<api_types::OverlayKeyframe>>,
+    bg_info: Option<(Uuid, String, Option<f64>)>,
+    image_url: Option<String>,
+    project_id: Uuid,
+    on_change: impl Fn() + Copy + 'static,
+) -> impl IntoView {
+    let kf = keyframes.with_untracked(|kfs| kfs[index].clone());
+
+    // Background frame URL
+    let bg_url = bg_info.as_ref().map(|(id, slug, dur)| {
+        let t_norm = if let Some(d) = dur {
+            if *d > 0.0 { (kf.t_ms / 1000.0 / d).clamp(0.0, 1.0) as f32 } else { 0.0 }
+        } else { 0.0 };
+        absolute_url(&format!(
+            "/api/projects/{}/nodes/{}/{}/thumbnail?t={}&w=640",
+            project_id, slug, id, t_norm
+        ))
+    });
+
+    let drag_active = create_rw_signal(false);
+    let local_x = create_rw_signal(kf.x);
+    let local_y = create_rw_signal(kf.y);
+    let local_scale = create_rw_signal(kf.scale);
+    let local_alpha = create_rw_signal(kf.alpha);
+    let local_radius = create_rw_signal(kf.corner_radius);
+    let local_interp = create_rw_signal(kf.interpolation);
+
+    let commit = move || {
+        keyframes.update(|kfs| {
+            if let Some(kf) = kfs.get_mut(index) {
+                kf.x = local_x.get_untracked();
+                kf.y = local_y.get_untracked();
+                kf.scale = local_scale.get_untracked();
+                kf.alpha = local_alpha.get_untracked();
+                kf.corner_radius = local_radius.get_untracked();
+                kf.interpolation = local_interp.get_untracked();
+            }
+        });
+        on_change();
+    };
+
+    let preview_ref = create_node_ref::<leptos::html::Div>();
+
+    let on_preview_mousedown = move |ev: MouseEvent| {
+        ev.prevent_default();
+        ev.stop_propagation();
+        drag_active.set(true);
+        if let Some(el) = preview_ref.get_untracked() {
+            let rect = el.get_bounding_client_rect();
+            let nx = (ev.client_x() as f64 - rect.left()) / rect.width();
+            let ny = (ev.client_y() as f64 - rect.top()) / rect.height();
+            local_x.set(nx);
+            local_y.set(ny);
+        }
+    };
+
+    let on_preview_mousemove = move |ev: MouseEvent| {
+        if !drag_active.get_untracked() { return; }
+        ev.prevent_default();
+        ev.stop_propagation();
+        if let Some(el) = preview_ref.get_untracked() {
+            let rect = el.get_bounding_client_rect();
+            let nx = (ev.client_x() as f64 - rect.left()) / rect.width();
+            let ny = (ev.client_y() as f64 - rect.top()) / rect.height();
+            local_x.set(nx);
+            local_y.set(ny);
+        }
+    };
+
+    let on_preview_mouseup = move |ev: MouseEvent| {
+        ev.stop_propagation();
+        if drag_active.get_untracked() {
+            drag_active.set(false);
+            commit();
+        }
+    };
+
+    let img_url_for_view = image_url.clone();
+    let has_bg = bg_url.is_some();
+    let bg_loaded = create_rw_signal(!has_bg);
+
+    view! {
+        <div class="overlay-visual-editor">
+            <div class=move || if bg_loaded.get() { "overlay-preview loaded" } else { "overlay-preview" }
+                node_ref=preview_ref
+                on:mousedown=on_preview_mousedown
+                on:mousemove=on_preview_mousemove
+                on:mouseup=on_preview_mouseup
+                on:mouseleave=move |_| {
+                    if drag_active.get_untracked() {
+                        drag_active.set(false);
+                        commit();
+                    }
+                }
+            >
+                <Show when=move || !bg_loaded.get()>
+                    <div class="overlay-loading">"Загрузка кадра..."</div>
+                </Show>
+                {bg_url.map(|url| view! {
+                    <img class="overlay-bg-frame" src=url draggable="false"
+                        on:load=move |_| bg_loaded.set(true)
+                    />
+                })}
+                {img_url_for_view.map(|url| view! {
+                    <img class="overlay-img-preview" src=url draggable="false"
+                        style=move || {
+                            let x_pct = local_x.get() * 100.0;
+                            let y_pct = local_y.get() * 100.0;
+                            let s = local_scale.get() * 100.0;
+                            let a = local_alpha.get();
+                            let r = local_radius.get();
+                            format!(
+                                "left:{:.1}%;top:{:.1}%;width:{:.1}%;transform:translate(-50%,-50%);opacity:{:.2};border-radius:{:.1}px;",
+                                x_pct, y_pct, s, a, r
+                            )
+                        }
+                    />
+                })}
+                <div class="overlay-crosshair" style=move || {
+                    format!("left:{:.1}%;top:{:.1}%;", local_x.get() * 100.0, local_y.get() * 100.0)
+                }></div>
+            </div>
+            <div class="overlay-sliders">
+                <label class="overlay-slider-row">
+                    <span>"scale"</span>
+                    <input type="range" min="0.05" max="3.0" step="0.01"
+                        prop:value=move || format!("{}", local_scale.get())
+                        on:input=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                local_scale.set(v);
+                            }
+                        }
+                        on:change=move |_| commit()
+                    />
+                    <span class="overlay-slider-val">{move || format!("{:.2}", local_scale.get())}</span>
+                </label>
+                <label class="overlay-slider-row">
+                    <span>"alpha"</span>
+                    <input type="range" min="0" max="1.0" step="0.01"
+                        prop:value=move || format!("{}", local_alpha.get())
+                        on:input=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                local_alpha.set(v);
+                            }
+                        }
+                        on:change=move |_| commit()
+                    />
+                    <span class="overlay-slider-val">{move || format!("{:.2}", local_alpha.get())}</span>
+                </label>
+                <label class="overlay-slider-row">
+                    <span>"radius"</span>
+                    <input type="range" min="0" max="100" step="1"
+                        prop:value=move || format!("{}", local_radius.get())
+                        on:input=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                local_radius.set(v);
+                            }
+                        }
+                        on:change=move |_| commit()
+                    />
+                    <span class="overlay-slider-val">{move || format!("{:.0}", local_radius.get())}</span>
+                </label>
+                <div class="overlay-xy-row">
+                    <label class="overlay-xy-field">
+                        <span>"x"</span>
+                        <input type="text"
+                            prop:value=move || format!("{:.3}", local_x.get())
+                            on:change=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                    local_x.set(v);
+                                    commit();
+                                }
+                            }
+                            on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                        />
+                    </label>
+                    <label class="overlay-xy-field">
+                        <span>"y"</span>
+                        <input type="text"
+                            prop:value=move || format!("{:.3}", local_y.get())
+                            on:change=move |ev| {
+                                if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                    local_y.set(v);
+                                    commit();
+                                }
+                            }
+                            on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+                        />
+                    </label>
+                </div>
+            </div>
+            {move || {
+                let kfs = keyframes.get();
+                if kfs.len() > 1 {
+                    let copy_open = create_rw_signal(false);
+                    let cur_idx = index;
+                    Some(view! {
+                        <div class="overlay-copy-wrap">
+                            <button class="overlay-copy-btn" on:click=move |ev: MouseEvent| {
+                                ev.stop_propagation();
+                                copy_open.update(|v| *v = !*v);
+                            }>"Copy from..."</button>
+                            <Show when=move || copy_open.get()>
+                                <div class="overlay-copy-menu">
+                                    {kfs.iter().enumerate().filter(|(i, _)| *i != cur_idx).map(|(i, kf)| {
+                                        let t = kf.t_ms;
+                                        let x = kf.x;
+                                        let y = kf.y;
+                                        let s = kf.scale;
+                                        let a = kf.alpha;
+                                        let r = kf.corner_radius;
+                                        let interp = kf.interpolation;
+                                        view! {
+                                            <button class="overlay-copy-item" on:click=move |ev: MouseEvent| {
+                                                ev.stop_propagation();
+                                                local_x.set(x);
+                                                local_y.set(y);
+                                                local_scale.set(s);
+                                                local_alpha.set(a);
+                                                local_radius.set(r);
+                                                local_interp.set(interp);
+                                                copy_open.set(false);
+                                                commit();
+                                            }>{format!("{:.0}ms", t)}</button>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                            </Show>
+                        </div>
+                    })
+                } else {
+                    None
+                }
+            }}
+        </div>
+    }
+}
+
 fn kind_label(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Input(InputNodeKind::Video) => "Видео",
@@ -1955,6 +3261,13 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Process(ProcessNodeKind::SubgraphInput) => "Вход",
         NodeKind::Process(ProcessNodeKind::SubgraphOutput) => "Выход",
         NodeKind::Process(ProcessNodeKind::Reduce) => "Reduce",
+        NodeKind::Process(ProcessNodeKind::AssBuilder) => "ASS субтитры",
+        NodeKind::Process(ProcessNodeKind::SubtitlePiece) => "Subtitle piece",
+        NodeKind::Process(ProcessNodeKind::Overlay) => "Оверлей",
+        NodeKind::Process(ProcessNodeKind::RemoveBackground) => "Убрать фон",
+        NodeKind::Process(ProcessNodeKind::ResizeImage) => "Ресайз",
+        NodeKind::Process(ProcessNodeKind::AddBorder) => "Обводка",
+        NodeKind::Reference { .. } => "&",
     }
 }
 

@@ -84,7 +84,14 @@ pub fn collect_stale_deps(
     let Some(node) = graph.nodes.iter().find(|n| n.id == node_id) else {
         return;
     };
-    let NodeKind::Process(pk) = node.kind else {
+
+    // References: follow through to the source node
+    if let NodeKind::Reference { source } = node.kind {
+        collect_stale_deps(graph, source, result, visited);
+        return;
+    }
+
+    let NodeKind::Process(_pk) = node.kind else {
         return; // Input nodes don't need processing
     };
 

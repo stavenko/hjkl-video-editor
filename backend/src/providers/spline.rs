@@ -39,6 +39,12 @@ pub fn evaluate(keyframes: &[SplineKeyframe], t: f64) -> f64 {
     match kf0.interpolation {
         Interpolation::Step => kf0.value,
         Interpolation::Linear => lerp(kf0.value, kf1.value, seg_t),
+        Interpolation::EaseIn => lerp(kf0.value, kf1.value, seg_t * seg_t),
+        Interpolation::EaseOut => lerp(kf0.value, kf1.value, 1.0 - (1.0 - seg_t) * (1.0 - seg_t)),
+        Interpolation::EaseInOut => {
+            let e = if seg_t < 0.5 { 2.0 * seg_t * seg_t } else { 1.0 - (-2.0 * seg_t + 2.0).powi(2) / 2.0 };
+            lerp(kf0.value, kf1.value, e)
+        }
         Interpolation::CatmullRom => {
             // Get 4 points for Catmull-Rom
             let p0 = if i > 0 {

@@ -45,7 +45,15 @@ pub enum ProcessNodeKind {
     SubgraphInput,
     SubgraphOutput,
     Reduce,
+    AssBuilder,
+    #[serde(alias = "PhraseSelector", alias = "SpellCheck")]
+    SubtitlePiece,
+    Overlay,
+    RemoveBackground,
+    ResizeImage,
+    AddBorder,
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReduceOp {
@@ -56,11 +64,15 @@ pub enum ReduceOp {
 
 // ─── Spline types (shared) ───
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Interpolation {
+    #[default]
     Linear,
     CatmullRom,
     Step,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +86,7 @@ pub struct SplineKeyframe {
 pub enum NodeKind {
     Input(InputNodeKind),
     Process(ProcessNodeKind),
+    Reference { source: Uuid },
 }
 
 impl InputNodeKind {
@@ -118,6 +131,12 @@ impl ProcessNodeKind {
             ProcessNodeKind::SubgraphInput => "subgraph-input",
             ProcessNodeKind::SubgraphOutput => "subgraph-output",
             ProcessNodeKind::Reduce => "reduce",
+            ProcessNodeKind::AssBuilder => "ass-builder",
+            ProcessNodeKind::SubtitlePiece => "subtitle-piece",
+            ProcessNodeKind::Overlay => "overlay",
+            ProcessNodeKind::RemoveBackground => "remove-background",
+            ProcessNodeKind::ResizeImage => "resize-image",
+            ProcessNodeKind::AddBorder => "add-border",
         }
     }
 
@@ -141,6 +160,12 @@ impl ProcessNodeKind {
             "subgraph-input" => Some(ProcessNodeKind::SubgraphInput),
             "subgraph-output" => Some(ProcessNodeKind::SubgraphOutput),
             "reduce" => Some(ProcessNodeKind::Reduce),
+            "ass-builder" => Some(ProcessNodeKind::AssBuilder),
+            "subtitle-piece" => Some(ProcessNodeKind::SubtitlePiece),
+            "overlay" => Some(ProcessNodeKind::Overlay),
+            "remove-background" => Some(ProcessNodeKind::RemoveBackground),
+            "resize-image" => Some(ProcessNodeKind::ResizeImage),
+            "add-border" => Some(ProcessNodeKind::AddBorder),
             _ => None,
         }
     }
@@ -163,6 +188,11 @@ impl ProcessNodeKind {
             ProcessNodeKind::SubgraphInput => NodeOutputKind::Json, // type configured in settings
             ProcessNodeKind::SubgraphOutput => NodeOutputKind::Json,
             ProcessNodeKind::Reduce => NodeOutputKind::Json,
+            ProcessNodeKind::AssBuilder => NodeOutputKind::Json,
+            ProcessNodeKind::SubtitlePiece => NodeOutputKind::Json,
+            ProcessNodeKind::Overlay => NodeOutputKind::Image,
+            ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
+            | ProcessNodeKind::AddBorder => NodeOutputKind::Image,
         }
     }
 
@@ -184,11 +214,23 @@ impl ProcessNodeKind {
             ProcessNodeKind::SubgraphInput => NodeOutputKind::Json,
             ProcessNodeKind::SubgraphOutput => NodeOutputKind::Json,
             ProcessNodeKind::Reduce => NodeOutputKind::Json,
+            ProcessNodeKind::AssBuilder => NodeOutputKind::Json,
+            ProcessNodeKind::SubtitlePiece => NodeOutputKind::Json,
+            ProcessNodeKind::Overlay => NodeOutputKind::Json,
+            ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
+            | ProcessNodeKind::AddBorder => NodeOutputKind::Image,
         }
     }
 
     pub fn has_inputs(&self) -> bool {
         !matches!(self, ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::SubgraphInput)
+    }
+
+    pub fn allows_multi_connect(&self, port: &str) -> bool {
+        matches!((self, port),
+            (ProcessNodeKind::Overlay, "times") |
+            (ProcessNodeKind::Mux, "clips")
+        )
     }
 }
 
@@ -197,7 +239,7 @@ impl ProcessNodeKind {
 pub enum NodeSettings {
     ExtractAudio,
     DetectSilence { noise_db: f64 },
-    DetectSubtitles { model: String },
+    DetectSubtitles { model: String, #[serde(default)] corrected_content: String },
     SpeechBounds {
         threshold_mul: f64,
         onset_windows: u32,
@@ -224,6 +266,40 @@ pub enum NodeSettings {
     SubgraphInput { output_kind: NodeOutputKind },
     SubgraphOutput { name: String },
     Reduce { operation: ReduceOp },
+    AssBuilder { titles: Vec<AssTitle> },
+    #[serde(alias = "PhraseSelector")]
+    SubtitlePiece { phrase: String, occurrence: u32 },
+    /// Legacy — kept only for deserializing old graph.toml files.
+    SpellCheck { content: String },
+    Overlay { keyframes: Vec<OverlayKeyframe> },
+    RemoveBackground { prompt: String },
+    ResizeImage { width: u32, height: u32 },
+    AddBorder { color: String, border_width: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssTitle {
+    pub text: String,
+    pub font: String,
+    pub size: u32,
+    pub color: String,
+    pub time_in_ms: f64,
+    pub time_out_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayKeyframe {
+    pub t_ms: f64,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default = "default_one")]
+    pub scale: f64,
+    #[serde(default = "default_one")]
+    pub alpha: f64,
+    #[serde(default)]
+    pub corner_radius: f64,
+    #[serde(default)]
+    pub interpolation: Interpolation,
 }
 
 impl NodeSettings {
@@ -233,6 +309,7 @@ impl NodeSettings {
             ProcessNodeKind::DetectSilence => NodeSettings::DetectSilence { noise_db: -30.0 },
             ProcessNodeKind::DetectSubtitles => NodeSettings::DetectSubtitles {
                 model: "small".to_string(),
+                corrected_content: String::new(),
             },
             ProcessNodeKind::SpeechBounds => NodeSettings::SpeechBounds {
                 threshold_mul: 8.0,
@@ -263,6 +340,15 @@ impl NodeSettings {
             ProcessNodeKind::SubgraphInput => NodeSettings::SubgraphInput { output_kind: NodeOutputKind::Video },
             ProcessNodeKind::SubgraphOutput => NodeSettings::SubgraphOutput { name: "output".to_string() },
             ProcessNodeKind::Reduce => NodeSettings::Reduce { operation: ReduceOp::Collect },
+            ProcessNodeKind::AssBuilder => NodeSettings::AssBuilder { titles: Vec::new() },
+            ProcessNodeKind::SubtitlePiece => NodeSettings::SubtitlePiece {
+                phrase: String::new(),
+                occurrence: 0,
+            },
+            ProcessNodeKind::Overlay => NodeSettings::Overlay { keyframes: Vec::new() },
+            ProcessNodeKind::RemoveBackground => NodeSettings::RemoveBackground { prompt: String::new() },
+            ProcessNodeKind::ResizeImage => NodeSettings::ResizeImage { width: 1920, height: 1080 },
+            ProcessNodeKind::AddBorder => NodeSettings::AddBorder { color: "#FFFFFF".to_string(), border_width: 5 },
         }
     }
 
@@ -270,7 +356,11 @@ impl NodeSettings {
         match self {
             NodeSettings::ExtractAudio => "extract-audio".to_string(),
             NodeSettings::DetectSilence { noise_db } => format!("detect-silence:noise={noise_db}"),
-            NodeSettings::DetectSubtitles { model } => format!("detect-subtitles:model={model}"),
+            NodeSettings::DetectSubtitles { model, corrected_content } => {
+                let mut h: u64 = 0;
+                for b in corrected_content.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                format!("detect-subtitles:model={model}:cc={h:x}")
+            }
             NodeSettings::SpeechBounds {
                 threshold_mul,
                 onset_windows,
@@ -300,6 +390,38 @@ impl NodeSettings {
             NodeSettings::SubgraphInput { output_kind } => format!("subgraph-input:{:?}", output_kind),
             NodeSettings::SubgraphOutput { name } => format!("subgraph-output:{name}"),
             NodeSettings::Reduce { operation } => format!("reduce:{:?}", operation),
+            NodeSettings::AssBuilder { titles } => {
+                let mut h: u64 = 0;
+                for t in titles {
+                    for b in t.text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                    h = h.wrapping_mul(31).wrapping_add(t.time_in_ms.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(t.time_out_ms.to_bits());
+                }
+                format!("ass-builder:{:x}:{}", h, titles.len())
+            }
+            NodeSettings::SubtitlePiece { phrase, occurrence } => {
+                format!("subtitle-piece:v2:{}:{}", phrase, occurrence)
+            }
+            NodeSettings::SpellCheck { content } => {
+                let mut h: u64 = 0;
+                for b in content.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                format!("spell-check:{:x}", h)
+            }
+            NodeSettings::Overlay { keyframes } => {
+                let mut h: u64 = 0;
+                for kf in keyframes {
+                    h = h.wrapping_mul(31).wrapping_add(kf.t_ms.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.x.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.y.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.scale.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.alpha.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.corner_radius.to_bits());
+                }
+                format!("overlay:{:x}:{}", h, keyframes.len())
+            }
+            NodeSettings::RemoveBackground { prompt } => format!("remove-bg:{prompt}"),
+            NodeSettings::ResizeImage { width, height } => format!("resize:{width}x{height}"),
+            NodeSettings::AddBorder { color, border_width } => format!("add-border:{color}:{border_width}"),
         }
     }
 }
@@ -335,6 +457,18 @@ impl NodeKind {
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
             ],
             NodeKind::Process(pk) => pk.output_ports(),
+            NodeKind::Reference { .. } => vec![], // resolved dynamically via source node
+        }
+    }
+
+    pub fn output_ports_in_graph(&self, nodes: &[Node]) -> Vec<PortDef> {
+        match self {
+            NodeKind::Reference { source } => {
+                resolve_reference(nodes, *source)
+                    .map(|n| n.kind.output_ports())
+                    .unwrap_or_default()
+            }
+            other => other.output_ports(),
         }
     }
 
@@ -345,8 +479,22 @@ impl NodeKind {
             NodeKind::Input(InputNodeKind::Image) => NodeOutputKind::Image,
             NodeKind::Input(InputNodeKind::VideoArray) => NodeOutputKind::Json,
             NodeKind::Process(p) => p.produced_output(),
+            NodeKind::Reference { .. } => NodeOutputKind::Json, // resolved dynamically
         }
     }
+}
+
+/// Resolve a reference chain to the actual (non-reference) node.
+pub fn resolve_reference(nodes: &[Node], source: Uuid) -> Option<&Node> {
+    let mut current = source;
+    for _ in 0..20 {
+        let node = nodes.iter().find(|n| n.id == current)?;
+        match node.kind {
+            NodeKind::Reference { source: next } => current = next,
+            _ => return Some(node),
+        }
+    }
+    None
 }
 
 // ─── Position ───
@@ -445,11 +593,21 @@ impl ProcessNodeKind {
             | ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
             | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide
             | ProcessNodeKind::SubgraphInput | ProcessNodeKind::SubgraphOutput
-            | ProcessNodeKind::Reduce => vec![
+            | ProcessNodeKind::Reduce | ProcessNodeKind::AssBuilder
+            | ProcessNodeKind::Overlay => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
             ],
             ProcessNodeKind::Mux => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Video },
+            ],
+            ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
+            | ProcessNodeKind::AddBorder => vec![
+                PortDef { name: String::new(), kind: NodeOutputKind::Image },
+            ],
+            ProcessNodeKind::SubtitlePiece => vec![
+                PortDef { name: "start".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "end".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "segments".into(), kind: NodeOutputKind::Json },
             ],
             ProcessNodeKind::Map => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
@@ -471,6 +629,9 @@ impl ProcessNodeKind {
             ProcessNodeKind::SubgraphInput => vec![],
             ProcessNodeKind::SubgraphOutput => vec![String::new()],
             ProcessNodeKind::Reduce => vec!["array".into()],
+            ProcessNodeKind::AssBuilder => vec!["subtitles".into()],
+            ProcessNodeKind::SubtitlePiece => vec!["subtitles".into()],
+            ProcessNodeKind::Overlay => vec!["image".into()],
             _ => vec![String::new()],
         }
     }
@@ -504,6 +665,17 @@ impl ProcessNodeKind {
             ProcessNodeKind::SubgraphOutput => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
             ],
+            ProcessNodeKind::AssBuilder => vec![
+                PortDef { name: "subtitles".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::SubtitlePiece => vec![
+                PortDef { name: "subtitles".into(), kind: NodeOutputKind::Json },
+            ],
+            ProcessNodeKind::Overlay => vec![
+                PortDef { name: "image".into(), kind: NodeOutputKind::Image },
+                PortDef { name: "times".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "background".into(), kind: NodeOutputKind::Video },
+            ],
             ProcessNodeKind::Reduce => vec![
                 PortDef { name: "array".into(), kind: NodeOutputKind::Json },
             ],
@@ -514,24 +686,12 @@ impl ProcessNodeKind {
                 PortDef { name: "scale".into(), kind: NodeOutputKind::Json },
                 PortDef { name: "corner_radius".into(), kind: NodeOutputKind::Json },
             ],
-            ProcessNodeKind::Mux => {
-                let num_clips = match settings {
-                    Some(NodeSettings::Mux { num_clips, .. }) => *num_clips,
-                    _ => 1,
-                };
-                let mut ports = vec![
-                    PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
-                    PortDef { name: "width".into(), kind: NodeOutputKind::Json },
-                    PortDef { name: "height".into(), kind: NodeOutputKind::Json },
-                ];
-                for i in 0..num_clips {
-                    ports.push(PortDef {
-                        name: format!("clip_{i}"),
-                        kind: NodeOutputKind::Json,
-                    });
-                }
-                ports
-            }
+            ProcessNodeKind::Mux => vec![
+                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "clips".into(), kind: NodeOutputKind::Json },
+            ],
             _ => vec![PortDef {
                 name: String::new(),
                 kind: self.accepted_input(),
@@ -646,6 +806,9 @@ pub struct CreateNodeInput {
     pub project_id: Uuid,
     pub kind: NodeKind,
     pub position: Position,
+    /// If Some, create inside this Map node's subgraph
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -657,6 +820,8 @@ pub struct CreateNodeOutput {
 pub struct DeleteNodeInput {
     pub project_id: Uuid,
     pub node_id: Uuid,
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -669,6 +834,8 @@ pub struct UpdateNodePositionInput {
     pub project_id: Uuid,
     pub node_id: Uuid,
     pub position: Position,
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,6 +854,8 @@ pub struct ConnectNodesInput {
     pub to_node: Uuid,
     #[serde(default)]
     pub to_port: String,
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -703,6 +872,8 @@ pub struct DisconnectNodesInput {
     pub to_node: Uuid,
     #[serde(default)]
     pub to_port: String,
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

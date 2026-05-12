@@ -65,7 +65,9 @@ pub async fn handler(
             storage.asset_file_path(params.project_id, asset)
         }
         NodeKind::Process(ProcessNodeKind::ExtractAudio)
-        | NodeKind::Process(ProcessNodeKind::TrimAudio) => {
+        | NodeKind::Process(ProcessNodeKind::TrimAudio)
+        | NodeKind::Process(ProcessNodeKind::TrimVideo)
+        | NodeKind::Process(ProcessNodeKind::Mux) => {
             let output = node
                 .output
                 .as_ref()
@@ -81,13 +83,20 @@ pub async fn handler(
         }
     };
 
+    let is_video = matches!(node.kind,
+        NodeKind::Input(InputNodeKind::Video)
+        | NodeKind::Process(ProcessNodeKind::TrimVideo)
+        | NodeKind::Process(ProcessNodeKind::Mux)
+    );
+
     // Quantize to integer permille for stable cache keys
     let start_pm = (start * 1000.0).round() as u32;
     let end_pm = (end * 1000.0).round() as u32;
 
+    let ext = if is_video { "mp4" } else { "wav" };
     let clip_path = storage.assets_dir(params.project_id).join(format!(
-        "{}.loop_{}_{}.wav",
-        params.node_id, start_pm, end_pm
+        "{}.loop_{}_{}.{}",
+        params.node_id, start_pm, end_pm, ext
     ));
 
     if !clip_path.exists() {
@@ -116,10 +125,17 @@ pub async fn handler(
         let start_s = start * total_secs;
         let duration_s = (end - start) * total_secs;
 
-        ffmpeg
-            .trim_audio(&source_path, &clip_path, start_s, duration_s)
-            .await
-            .map_err(actix_web::error::ErrorInternalServerError)?;
+        if is_video {
+            ffmpeg
+                .trim_video(&source_path, &clip_path, start_s, duration_s)
+                .await
+                .map_err(actix_web::error::ErrorInternalServerError)?;
+        } else {
+            ffmpeg
+                .trim_audio(&source_path, &clip_path, start_s, duration_s)
+                .await
+                .map_err(actix_web::error::ErrorInternalServerError)?;
+        }
     }
 
     let named = NamedFile::open_async(&clip_path)

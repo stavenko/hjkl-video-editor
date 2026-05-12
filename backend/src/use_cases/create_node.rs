@@ -49,7 +49,18 @@ pub async fn command(
         },
         settings,
     };
-    graph.nodes.push(node.clone());
+
+    if let Some(parent_id) = input.parent_map_id {
+        // Create inside a Map node's subgraph
+        let parent = graph.nodes.iter_mut()
+            .find(|n| n.id == parent_id)
+            .ok_or(ProjectStorageError::NotFound(parent_id))?;
+        let sg = parent.subgraph.get_or_insert_with(|| Box::new(crate::models::project::Graph::default()));
+        sg.nodes.push(node.clone());
+    } else {
+        graph.nodes.push(node.clone());
+    }
+
     storage.write_graph(input.project_id, &graph).await?;
     Ok(CreateNodeOutput {
         node: node.to_api(),
