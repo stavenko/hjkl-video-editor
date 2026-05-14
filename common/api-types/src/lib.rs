@@ -52,6 +52,9 @@ pub enum ProcessNodeKind {
     RemoveBackground,
     ResizeImage,
     AddBorder,
+    SubtitleTrack,
+    NamedInput,
+    NamedOutput,
 }
 
 
@@ -137,6 +140,9 @@ impl ProcessNodeKind {
             ProcessNodeKind::RemoveBackground => "remove-background",
             ProcessNodeKind::ResizeImage => "resize-image",
             ProcessNodeKind::AddBorder => "add-border",
+            ProcessNodeKind::SubtitleTrack => "subtitle-track",
+            ProcessNodeKind::NamedInput => "named-input",
+            ProcessNodeKind::NamedOutput => "named-output",
         }
     }
 
@@ -166,6 +172,9 @@ impl ProcessNodeKind {
             "remove-background" => Some(ProcessNodeKind::RemoveBackground),
             "resize-image" => Some(ProcessNodeKind::ResizeImage),
             "add-border" => Some(ProcessNodeKind::AddBorder),
+            "subtitle-track" => Some(ProcessNodeKind::SubtitleTrack),
+            "named-input" => Some(ProcessNodeKind::NamedInput),
+            "named-output" => Some(ProcessNodeKind::NamedOutput),
             _ => None,
         }
     }
@@ -193,6 +202,8 @@ impl ProcessNodeKind {
             ProcessNodeKind::Overlay => NodeOutputKind::Image,
             ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
             | ProcessNodeKind::AddBorder => NodeOutputKind::Image,
+            ProcessNodeKind::SubtitleTrack => NodeOutputKind::Json,
+            ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => NodeOutputKind::Json,
         }
     }
 
@@ -219,17 +230,21 @@ impl ProcessNodeKind {
             ProcessNodeKind::Overlay => NodeOutputKind::Json,
             ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
             | ProcessNodeKind::AddBorder => NodeOutputKind::Image,
+            ProcessNodeKind::SubtitleTrack => NodeOutputKind::Json,
+            ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => NodeOutputKind::Json,
         }
     }
 
     pub fn has_inputs(&self) -> bool {
-        !matches!(self, ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::SubgraphInput)
+        !matches!(self, ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::SubgraphInput | ProcessNodeKind::NamedOutput)
     }
 
     pub fn allows_multi_connect(&self, port: &str) -> bool {
         matches!((self, port),
             (ProcessNodeKind::Overlay, "times") |
-            (ProcessNodeKind::Mux, "clips")
+            (ProcessNodeKind::Clip, "times") |
+            (ProcessNodeKind::Mux, "clips") |
+            (ProcessNodeKind::SubtitleTrack, "subs")
         )
     }
 }
@@ -259,6 +274,8 @@ pub enum NodeSettings {
         time_out: f64,
         #[serde(default = "default_preview_width")]
         preview_width: u32,
+        #[serde(default)]
+        keyframes: Vec<OverlayKeyframe>,
     },
     Mux { num_clips: u32, fps: u32 },
     MathOp,
@@ -275,7 +292,23 @@ pub enum NodeSettings {
     RemoveBackground { prompt: String },
     ResizeImage { width: u32, height: u32 },
     AddBorder { color: String, border_width: u32 },
+    SubtitleTrack {
+        styles: Vec<SubtitleStyle>,
+        #[serde(default)]
+        segments: Vec<SubtitleSegment>,
+        #[serde(default = "default_res")]
+        resolution_x: u32,
+        #[serde(default = "default_res")]
+        resolution_y: u32,
+        #[serde(default = "default_fps")]
+        fps: u32,
+    },
+    NamedInput { name: String },
+    NamedOutput { names: Vec<String> },
 }
+
+fn default_res() -> u32 { 1920 }
+fn default_fps() -> u32 { 30 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssTitle {
@@ -300,6 +333,87 @@ pub struct OverlayKeyframe {
     pub corner_radius: f64,
     #[serde(default)]
     pub interpolation: Interpolation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleStyle {
+    pub name: String,
+    #[serde(default = "default_font")]
+    pub font: String,
+    #[serde(default = "default_sub_size")]
+    pub size: u32,
+    #[serde(default = "default_white")]
+    pub color: String,
+    #[serde(default = "default_black")]
+    pub outline_color: String,
+    #[serde(default = "default_outline_w")]
+    pub outline_width: u32,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default = "default_alignment")]
+    pub alignment: u8,
+    #[serde(default = "default_margin_v")]
+    pub margin_v: u32,
+}
+
+fn default_font() -> String { "Arial".to_string() }
+fn default_sub_size() -> u32 { 48 }
+fn default_white() -> String { "#FFFFFF".to_string() }
+fn default_black() -> String { "#000000".to_string() }
+fn default_outline_w() -> u32 { 2 }
+fn default_alignment() -> u8 { 2 }
+fn default_margin_v() -> u32 { 30 }
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        Self {
+            name: "Default".to_string(),
+            font: default_font(), size: default_sub_size(),
+            color: default_white(), outline_color: default_black(),
+            outline_width: default_outline_w(),
+            bold: false, italic: false,
+            alignment: default_alignment(), margin_v: default_margin_v(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleSegment {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    #[serde(default)]
+    pub track: u32,
+    #[serde(default)]
+    pub style_name: Option<String>,
+    #[serde(default = "default_pos_x")]
+    pub pos_x: f64,
+    #[serde(default = "default_pos_y")]
+    pub pos_y: f64,
+}
+
+fn default_pos_x() -> f64 { 0.5 }
+fn default_pos_y() -> f64 { 0.9 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleSegmentOverride {
+    pub index: usize,
+    #[serde(default)]
+    pub start_ms: Option<f64>,
+    #[serde(default)]
+    pub end_ms: Option<f64>,
+    #[serde(default)]
+    pub style_name: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub pos_x: Option<f64>,
+    #[serde(default)]
+    pub pos_y: Option<f64>,
+    #[serde(default)]
+    pub track: u32,
 }
 
 impl NodeSettings {
@@ -332,6 +446,7 @@ impl NodeSettings {
                 time_in: 0.0,
                 time_out: 1.0,
                 preview_width: 320,
+                keyframes: Vec::new(),
             },
             ProcessNodeKind::Mux => NodeSettings::Mux { num_clips: 1, fps: 30 },
             ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
@@ -349,6 +464,15 @@ impl NodeSettings {
             ProcessNodeKind::RemoveBackground => NodeSettings::RemoveBackground { prompt: String::new() },
             ProcessNodeKind::ResizeImage => NodeSettings::ResizeImage { width: 1920, height: 1080 },
             ProcessNodeKind::AddBorder => NodeSettings::AddBorder { color: "#FFFFFF".to_string(), border_width: 5 },
+            ProcessNodeKind::NamedInput => NodeSettings::NamedInput { name: "default".to_string() },
+            ProcessNodeKind::NamedOutput => NodeSettings::NamedOutput { names: Vec::new() },
+            ProcessNodeKind::SubtitleTrack => NodeSettings::SubtitleTrack {
+                styles: vec![SubtitleStyle::default()],
+                segments: Vec::new(),
+                resolution_x: 1920,
+                resolution_y: 1080,
+                fps: 30,
+            },
         }
     }
 
@@ -379,8 +503,16 @@ impl NodeSettings {
                 }
                 format!("spline:{h:x}")
             }
-            NodeSettings::Clip { trim_start_ms, trim_end_ms, time_in, time_out, preview_width } => {
-                format!("clip:s={trim_start_ms}:e={trim_end_ms}:in={time_in}:out={time_out}:pw={preview_width}")
+            NodeSettings::Clip { trim_start_ms, trim_end_ms, time_in, time_out, preview_width, keyframes } => {
+                let mut h: u64 = 0;
+                for kf in keyframes {
+                    h = h.wrapping_mul(31).wrapping_add(kf.t_ms.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.x.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.y.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.scale.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.alpha.to_bits());
+                }
+                format!("clip:s={trim_start_ms}:e={trim_end_ms}:in={time_in}:out={time_out}:pw={preview_width}:kf={h:x}")
             }
             NodeSettings::Mux { num_clips, fps } => {
                 format!("mux:n={num_clips}:fps={fps}")
@@ -422,6 +554,26 @@ impl NodeSettings {
             NodeSettings::RemoveBackground { prompt } => format!("remove-bg:{prompt}"),
             NodeSettings::ResizeImage { width, height } => format!("resize:{width}x{height}"),
             NodeSettings::AddBorder { color, border_width } => format!("add-border:{color}:{border_width}"),
+            NodeSettings::SubtitleTrack { styles, segments, resolution_x, resolution_y, fps } => {
+                let mut h: u64 = 0;
+                for s in styles {
+                    for b in s.name.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                    h = h.wrapping_mul(31).wrapping_add(s.size as u64);
+                    for b in s.color.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                    h = h.wrapping_mul(31).wrapping_add(s.bold as u64);
+                }
+                for seg in segments {
+                    for b in seg.text.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                    h = h.wrapping_mul(31).wrapping_add(seg.start_ms.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(seg.end_ms.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(seg.track as u64);
+                    h = h.wrapping_mul(31).wrapping_add(seg.pos_x.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(seg.pos_y.to_bits());
+                }
+                format!("sub-track:{:x}:{}x{}", h, resolution_x, resolution_y)
+            }
+            NodeSettings::NamedInput { name } => format!("named-input:{name}"),
+            NodeSettings::NamedOutput { names } => format!("named-output:{}", names.join(",")),
         }
     }
 }
@@ -594,7 +746,8 @@ impl ProcessNodeKind {
             | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide
             | ProcessNodeKind::SubgraphInput | ProcessNodeKind::SubgraphOutput
             | ProcessNodeKind::Reduce | ProcessNodeKind::AssBuilder
-            | ProcessNodeKind::Overlay => vec![
+            | ProcessNodeKind::Overlay | ProcessNodeKind::SubtitleTrack
+            | ProcessNodeKind::NamedInput => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
             ],
             ProcessNodeKind::Mux => vec![
@@ -612,6 +765,20 @@ impl ProcessNodeKind {
             ProcessNodeKind::Map => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Json },
             ],
+            ProcessNodeKind::NamedOutput => vec![], // dynamic, based on settings
+        }
+    }
+
+    pub fn output_ports_with_settings(&self, settings: Option<&NodeSettings>) -> Vec<PortDef> {
+        match self {
+            ProcessNodeKind::NamedOutput => {
+                if let Some(NodeSettings::NamedOutput { names }) = settings {
+                    names.iter().map(|n| PortDef { name: n.clone(), kind: NodeOutputKind::Json }).collect()
+                } else {
+                    vec![]
+                }
+            }
+            _ => self.output_ports(),
         }
     }
 
@@ -621,7 +788,7 @@ impl ProcessNodeKind {
             ProcessNodeKind::Scalar | ProcessNodeKind::Spline => vec![],
             ProcessNodeKind::TrimAudio => vec!["audio".into(), "start".into(), "end".into()],
             ProcessNodeKind::TrimVideo => vec!["video".into(), "start".into(), "end".into()],
-            ProcessNodeKind::Clip => vec!["media".into()],
+            ProcessNodeKind::Clip => vec!["media".into(), "times".into()],
             ProcessNodeKind::Mux => vec!["duration".into(), "width".into(), "height".into()],
             ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
             | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => vec!["a".into(), "b".into()],
@@ -632,6 +799,7 @@ impl ProcessNodeKind {
             ProcessNodeKind::AssBuilder => vec!["subtitles".into()],
             ProcessNodeKind::SubtitlePiece => vec!["subtitles".into()],
             ProcessNodeKind::Overlay => vec!["image".into()],
+            ProcessNodeKind::SubtitleTrack => vec!["subs".into()],
             _ => vec![String::new()],
         }
     }
@@ -642,7 +810,7 @@ impl ProcessNodeKind {
 
     pub fn input_ports_with_settings(&self, settings: Option<&NodeSettings>) -> Vec<PortDef> {
         match self {
-            ProcessNodeKind::Scalar | ProcessNodeKind::Spline => vec![],
+            ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::NamedOutput => vec![],
             ProcessNodeKind::TrimAudio => vec![
                 PortDef { name: "audio".into(), kind: NodeOutputKind::Audio },
                 PortDef { name: "start".into(), kind: NodeOutputKind::Json },
@@ -676,21 +844,23 @@ impl ProcessNodeKind {
                 PortDef { name: "times".into(), kind: NodeOutputKind::Json },
                 PortDef { name: "background".into(), kind: NodeOutputKind::Video },
             ],
+            ProcessNodeKind::SubtitleTrack => vec![
+                PortDef { name: "subs".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "video".into(), kind: NodeOutputKind::Video },
+            ],
             ProcessNodeKind::Reduce => vec![
                 PortDef { name: "array".into(), kind: NodeOutputKind::Json },
             ],
             ProcessNodeKind::Clip => vec![
                 PortDef { name: "media".into(), kind: NodeOutputKind::Video },
-                PortDef { name: "x".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "y".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "scale".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "corner_radius".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "times".into(), kind: NodeOutputKind::Json },
             ],
             ProcessNodeKind::Mux => vec![
                 PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
                 PortDef { name: "width".into(), kind: NodeOutputKind::Json },
                 PortDef { name: "height".into(), kind: NodeOutputKind::Json },
                 PortDef { name: "clips".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "subtitles".into(), kind: NodeOutputKind::Json },
             ],
             _ => vec![PortDef {
                 name: String::new(),

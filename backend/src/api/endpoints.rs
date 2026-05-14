@@ -17,6 +17,7 @@ pub mod projects_delete;
 pub mod projects_list;
 pub mod projects_rename;
 pub mod run_node;
+pub mod subtitle_preview;
 pub mod task_status;
 pub mod upload_begin;
 pub mod upload_chunk;

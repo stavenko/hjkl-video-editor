@@ -63,12 +63,19 @@ pub async fn command(
             from_kind.produced_output(),
         ))?;
 
-    // Resolve output ports through references
+    // Resolve output ports through references, using settings for dynamic ports
+    let from_node_ref = tg.nodes.iter().find(|n| n.id == input.from_node);
     let source_ports = match from_kind {
         NodeKind::Reference { source } => {
             crate::models::project::resolve_reference(&tg.nodes, source)
-                .map(|n| n.kind.output_ports())
+                .map(|n| match n.kind {
+                    NodeKind::Process(pk) => pk.output_ports_with_settings(n.settings.as_ref()),
+                    _ => n.kind.output_ports(),
+                })
                 .unwrap_or_default()
+        }
+        NodeKind::Process(pk) => {
+            pk.output_ports_with_settings(from_node_ref.and_then(|n| n.settings.as_ref()))
         }
         _ => from_kind.output_ports(),
     };

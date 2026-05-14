@@ -199,7 +199,8 @@ async fn process_node(
         ProcessNodeKind::Map | ProcessNodeKind::SubgraphInput
         | ProcessNodeKind::SubgraphOutput | ProcessNodeKind::Reduce
         | ProcessNodeKind::AssBuilder | ProcessNodeKind::SubtitlePiece
-        | ProcessNodeKind::Overlay => ("json", "application/json"),
+        | ProcessNodeKind::Overlay | ProcessNodeKind::SubtitleTrack
+        | ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => ("json", "application/json"),
         ProcessNodeKind::Mux => ("mp4", "video/mp4"),
         ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
         | ProcessNodeKind::AddBorder => ("png", "image/png"),
@@ -364,31 +365,125 @@ async fn process_node(
                 .map_err(|e| e.to_string())?;
         }
         ProcessNodeKind::Clip => {
-            let x_json = read_port_json(storage, req.project_id, &graph, &input_edges, "x")
-                .await.unwrap_or_default();
-            let y_json = read_port_json(storage, req.project_id, &graph, &input_edges, "y")
-                .await.unwrap_or_default();
-            let scale_json = read_port_json(storage, req.project_id, &graph, &input_edges, "scale")
-                .await.unwrap_or_default();
-            let cr_json = read_port_json(storage, req.project_id, &graph, &input_edges, "corner_radius")
-                .await.unwrap_or_default();
-
-            let (trim_start, trim_end, time_in, time_out, preview_width) = match &node.settings {
+            let (trim_start, trim_end, time_in, time_out, preview_width, keyframes) = match &node.settings {
                 Some(api_types::NodeSettings::Clip {
-                    trim_start_ms, trim_end_ms, time_in, time_out, preview_width
-                }) => (*trim_start_ms, *trim_end_ms, *time_in, *time_out, *preview_width),
-                _ => (0.0, 0.0, 0.0, 1.0, 320),
+                    trim_start_ms, trim_end_ms, time_in, time_out, preview_width, keyframes
+                }) => (*trim_start_ms, *trim_end_ms, *time_in, *time_out, *preview_width, keyframes.clone()),
+                _ => (0.0, 0.0, 0.0, 1.0, 320, Vec::new()),
             };
 
+            // Collect time points from multi-connect "times" port (same as Overlay)
+            let mut times: Vec<f64> = Vec::new();
+            for edge in input_edges.iter().filter(|e| e.to_port == "times") {
+                let raw_src = graph.nodes.iter().find(|n| n.id == edge.from_node);
+                if let Some(src) = raw_src {
+                    let resolved = match src.kind {
+                        NodeKind::Reference { source } =>
+                            crate::models::project::resolve_reference(&graph.nodes, source).unwrap_or(src),
+                        _ => src,
+                    };
+                    // NamedOutput: resolve through to NamedInput
+                    let actual_node = if matches!(resolved.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
+                        graph.nodes.iter().find(|n| {
+                            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if *name == edge.from_port)
+                        }).unwrap_or(resolved)
+                    } else {
+                        resolved
+                    };
+
+                    if let Some(output) = &actual_node.output {
+                        let json_path = storage.assets_dir(req.project_id).join(&output.file_name);
+                        if let Ok(content) = tokio::fs::read_to_string(&json_path).await {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                let field = format!("{}_ms", edge.from_port);
+                                if let Some(v) = json.get(&field).and_then(|v| v.as_f64()) {
+                                    times.push(v);
+                                } else if let Some(v) = json.get("start_ms").and_then(|v| v.as_f64()) {
+                                    // SubtitlePiece-like output: grab both start and end
+                                    times.push(v);
+                                    if let Some(e) = json.get("end_ms").and_then(|v| v.as_f64()) {
+                                        times.push(e);
+                                    }
+                                } else if let Some(v) = json.get("value").and_then(|v| v.as_f64()) {
+                                    times.push(v);
+                                } else if let Some(v) = json.as_f64() {
+                                    times.push(v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            times.dedup();
+
+            // Merge keyframes from settings with time points
+            let merged_kfs: Vec<api_types::OverlayKeyframe> = if !times.is_empty() {
+                times.iter().map(|&t| {
+                    keyframes.iter().find(|k| (k.t_ms - t).abs() < 0.5)
+                        .cloned()
+                        .unwrap_or(api_types::OverlayKeyframe {
+                            t_ms: t, x: 0.5, y: 0.5,
+                            scale: 1.0, alpha: 1.0, corner_radius: 0.0,
+                            interpolation: api_types::Interpolation::Linear,
+                        })
+                }).collect()
+            } else {
+                keyframes.clone()
+            };
+
+            // Save merged keyframes back to settings
+            if !times.is_empty() {
+                let mut g = storage.read_graph(req.project_id).await.map_err(|e| e.to_string())?;
+                if let Some(n) = g.nodes.iter_mut().find(|n| n.id == req.node_id) {
+                    if let Some(api_types::NodeSettings::Clip { keyframes: ref mut kfs, .. }) = n.settings {
+                        *kfs = merged_kfs.clone();
+                    }
+                }
+                storage.write_graph(req.project_id, &g).await.map_err(|e| e.to_string())?;
+            }
+
+            // Build spline arrays from keyframes
+            let start_ms = merged_kfs.first().map(|k| k.t_ms).unwrap_or(0.0);
+            let end_ms = merged_kfs.last().map(|k| k.t_ms).unwrap_or(0.0);
+            let duration_ms = if end_ms > start_ms { end_ms - start_ms } else { 1.0 };
+
+            let mut x_kf = Vec::new();
+            let mut y_kf = Vec::new();
+            let mut scale_kf = Vec::new();
+            let mut alpha_kf = Vec::new();
+            let mut cr_kf = Vec::new();
+
+            for kf in &merged_kfs {
+                let t_norm = ((kf.t_ms - start_ms) / duration_ms).clamp(0.0, 1.0);
+                let interp = format!("{:?}", kf.interpolation);
+                let entry = |val: f64| serde_json::json!({"t": t_norm, "value": val, "interpolation": interp});
+                x_kf.push(entry(kf.x));
+                y_kf.push(entry(kf.y));
+                scale_kf.push(entry(kf.scale));
+                alpha_kf.push(entry(kf.alpha));
+                cr_kf.push(entry(kf.corner_radius));
+            }
+
+            if merged_kfs.is_empty() {
+                let entry = |val: f64| serde_json::json!({"t": 0.0, "value": val, "interpolation": "Linear"});
+                x_kf.push(entry(0.5));
+                y_kf.push(entry(0.5));
+                scale_kf.push(entry(1.0));
+                alpha_kf.push(entry(1.0));
+                cr_kf.push(entry(0.0));
+            }
+
             let descriptor = serde_json::json!({
-                "x": serde_json::from_str::<serde_json::Value>(&x_json).unwrap_or(serde_json::json!([])),
-                "y": serde_json::from_str::<serde_json::Value>(&y_json).unwrap_or(serde_json::json!([])),
-                "scale": serde_json::from_str::<serde_json::Value>(&scale_json).unwrap_or(serde_json::json!([])),
-                "corner_radius": serde_json::from_str::<serde_json::Value>(&cr_json).unwrap_or(serde_json::json!([])),
+                "x": x_kf,
+                "y": y_kf,
+                "scale": scale_kf,
+                "corner_radius": cr_kf,
+                "alpha": alpha_kf,
+                "time_in_ms": start_ms,
+                "time_out_ms": end_ms,
                 "trim_start_ms": trim_start,
                 "trim_end_ms": trim_end,
-                "time_in": time_in,
-                "time_out": time_out,
             });
             tokio::fs::write(&output_path, serde_json::to_string_pretty(&descriptor).unwrap())
                 .await
@@ -606,15 +701,27 @@ async fn process_node(
                             crate::models::project::resolve_reference(&graph.nodes, source).unwrap_or(src),
                         _ => src,
                     };
-                    // Read the value from the from_port (e.g. "start" → "start_ms", or plain value)
-                    if let Some(output) = &resolved.output {
+                    // NamedOutput: resolve through to NamedInput
+                    let actual_node = if matches!(resolved.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
+                        graph.nodes.iter().find(|n| {
+                            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if *name == edge.from_port)
+                        }).unwrap_or(resolved)
+                    } else {
+                        resolved
+                    };
+
+                    if let Some(output) = &actual_node.output {
                         let json_path = storage.assets_dir(req.project_id).join(&output.file_name);
                         if let Ok(content) = tokio::fs::read_to_string(&json_path).await {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                                // Try "{from_port}_ms" field, then "value", then raw number
                                 let field = format!("{}_ms", edge.from_port);
                                 if let Some(v) = json.get(&field).and_then(|v| v.as_f64()) {
                                     times.push(v);
+                                } else if let Some(v) = json.get("start_ms").and_then(|v| v.as_f64()) {
+                                    times.push(v);
+                                    if let Some(e) = json.get("end_ms").and_then(|v| v.as_f64()) {
+                                        times.push(e);
+                                    }
                                 } else if let Some(v) = json.get("value").and_then(|v| v.as_f64()) {
                                     times.push(v);
                                 } else if let Some(v) = json.as_f64() {
@@ -707,6 +814,138 @@ async fn process_node(
             });
             tokio::fs::write(&output_path, serde_json::to_string_pretty(&result).unwrap())
                 .await.map_err(|e| e.to_string())?;
+        }
+        ProcessNodeKind::SubtitleTrack => {
+            // Read settings
+            let (styles, mut segments, res_x, res_y) = match &node.settings {
+                Some(api_types::NodeSettings::SubtitleTrack { styles, segments, resolution_x, resolution_y, .. }) =>
+                    (styles.clone(), segments.clone(), *resolution_x, *resolution_y),
+                _ => (vec![api_types::SubtitleStyle::default()], Vec::new(), 1920, 1080),
+            };
+
+            // If segments empty — import from inputs and save to settings
+            if segments.is_empty() {
+                let sub_edges: Vec<_> = input_edges.iter().filter(|e| e.to_port == "subs").collect();
+                for edge in &sub_edges {
+                    let raw_src = graph.nodes.iter().find(|n| n.id == edge.from_node);
+                    let Some(src_node) = raw_src else { continue };
+                    let resolved = match src_node.kind {
+                        NodeKind::Reference { source } =>
+                            crate::models::project::resolve_reference(&graph.nodes, source).unwrap_or(src_node),
+                        _ => src_node,
+                    };
+                    let Some(output) = &resolved.output else { continue };
+                    let json_path = storage.assets_dir(req.project_id).join(&output.file_name);
+                    let Ok(content) = tokio::fs::read_to_string(&json_path).await else { continue };
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let arr = if let Some(a) = v.as_array() { a.clone() }
+                            else if let Some(s) = v.get("segments").and_then(|s| s.as_array()) { s.clone() }
+                            else { Vec::new() };
+                        for item in &arr {
+                            let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            let start = item.get("start_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let end = item.get("end_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            if !text.is_empty() {
+                                segments.push(api_types::SubtitleSegment {
+                                    text, start_ms: start, end_ms: end, track: 0, style_name: None,
+                                    pos_x: 0.5, pos_y: 0.9,
+                                });
+                            }
+                        }
+                    }
+                }
+                segments.sort_by(|a, b| a.start_ms.partial_cmp(&b.start_ms).unwrap());
+
+                // Save imported segments back to settings
+                {
+                    let mut g = storage.read_graph(req.project_id).await.map_err(|e| e.to_string())?;
+                    if let Some(n) = g.nodes.iter_mut().find(|n| n.id == req.node_id) {
+                        if let Some(api_types::NodeSettings::SubtitleTrack { segments: ref mut s, .. }) = n.settings {
+                            *s = segments.clone();
+                        }
+                    }
+                    storage.write_graph(req.project_id, &g).await.map_err(|e| e.to_string())?;
+                }
+            }
+
+            // Generate ASS from segments
+            let mut ass = String::new();
+            ass.push_str("[Script Info]\nScriptType: v4.00+\n");
+            ass.push_str(&format!("PlayResX: {}\nPlayResY: {}\n\n", res_x, res_y));
+
+            ass.push_str("[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
+            for style in &styles {
+                let primary = ass_color(&style.color);
+                let outline = ass_color(&style.outline_color);
+                ass.push_str(&format!(
+                    "Style: {},{},{},{},&H00FFFFFF,{},&H80000000,{},{},0,0,100,100,0,0,1,{},0,{},10,10,{},1\n",
+                    style.name, style.font, style.size, primary, outline,
+                    if style.bold { -1 } else { 0 },
+                    if style.italic { -1i32 } else { 0 },
+                    style.outline_width, style.alignment, style.margin_v
+                ));
+            }
+
+            ass.push_str("\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
+            let default_style = styles.first().map(|s| s.name.as_str()).unwrap_or("Default");
+
+            for seg in &segments {
+                if seg.text.is_empty() { continue; }
+                let style_name = seg.style_name.as_deref().unwrap_or(default_style);
+                let start_t = format_ass_time(seg.start_ms);
+                let end_t = format_ass_time(seg.end_ms);
+                let pos_tag = if (seg.pos_x - 0.5).abs() > 0.01 || (seg.pos_y - 0.9).abs() > 0.01 {
+                    let px = (seg.pos_x * res_x as f64) as i32;
+                    let py = (seg.pos_y * res_y as f64) as i32;
+                    format!("{{\\pos({},{})}}", px, py)
+                } else { String::new() };
+                ass.push_str(&format!(
+                    "Dialogue: 0,{},{},{},,0,0,0,,{}{}\n",
+                    start_t, end_t, style_name, pos_tag, seg.text
+                ));
+            }
+
+            tokio::fs::write(&output_path, &ass).await.map_err(|e| e.to_string())?;
+        }
+        ProcessNodeKind::NamedInput => {
+            // Extract the specific port value from the connected source
+            // Try numeric first, then fall back to raw JSON
+            let val = read_port_value_f64(storage, req.project_id, &graph, &input_edges, "")
+                .await?;
+            if let Some(v) = val {
+                let json = serde_json::json!({"value": v});
+                tokio::fs::write(&output_path, serde_json::to_string_pretty(&json).unwrap())
+                    .await.map_err(|e| e.to_string())?;
+            } else {
+                // Not a number — copy raw JSON
+                let content = read_port_json(storage, req.project_id, &graph, &input_edges, "")
+                    .await
+                    .map_err(|e| format!("NamedInput: {e}"))?;
+                tokio::fs::write(&output_path, &content).await.map_err(|e| e.to_string())?;
+            }
+        }
+        ProcessNodeKind::NamedOutput => {
+            let names = match &node.settings {
+                Some(api_types::NodeSettings::NamedOutput { names }) => names.clone(),
+                _ => Vec::new(),
+            };
+            // For each name, find the NamedInput and copy its output
+            let mut result = serde_json::Map::new();
+            for name in &names {
+                let source = graph.nodes.iter().find(|n| {
+                    matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name: n }) if n == name)
+                });
+                if let Some(src) = source {
+                    if let Some(output) = &src.output {
+                        let src_path = storage.assets_dir(req.project_id).join(&output.file_name);
+                        if let Ok(content) = tokio::fs::read_to_string(&src_path).await {
+                            result.insert(name.clone(), serde_json::Value::String(content));
+                        }
+                    }
+                }
+            }
+            let json = serde_json::to_string_pretty(&result).unwrap();
+            tokio::fs::write(&output_path, &json).await.map_err(|e| e.to_string())?;
         }
         ProcessNodeKind::RemoveBackground => {
             let ip = input_path_ref.ok_or("RemoveBackground requires input")?;
@@ -994,8 +1233,36 @@ async fn process_node(
                 prev_label = out_label;
             }
 
+            // Check for subtitles input — write .ass file and add ass filter
+            let mut has_subs = false;
+            let subs_edge = input_edges.iter().find(|e| e.to_port == "subtitles");
+            if let Some(subs_e) = subs_edge {
+                let subs_src = graph.nodes.iter().find(|n| n.id == subs_e.from_node);
+                if let Some(subs_node) = subs_src {
+                    let resolved = match subs_node.kind {
+                        NodeKind::Reference { source } =>
+                            crate::models::project::resolve_reference(&graph.nodes, source).unwrap_or(subs_node),
+                        _ => subs_node,
+                    };
+                    if let Some(output) = &resolved.output {
+                        let ass_src = storage.assets_dir(req.project_id).join(&output.file_name);
+                        let ass_path = storage.assets_dir(req.project_id).join(format!("{}.subs.ass", req.node_id));
+                        if let Ok(content) = tokio::fs::read_to_string(&ass_src).await {
+                            let _ = tokio::fs::write(&ass_path, &content).await;
+                            let ass_str = ass_path.to_string_lossy().replace('\\', "/");
+                            // Chain: [out] -> ass -> [final]
+                            if !filter.ends_with(';') { filter.push(';'); }
+                            filter.push_str(&format!("[out]ass='{}'[final]", ass_str));
+                            has_subs = true;
+                        }
+                    }
+                }
+            }
+
             // Remove trailing semicolon
             if filter.ends_with(';') { filter.pop(); }
+
+            let map_label = if has_subs { "[final]" } else { "[out]" };
 
             // Find first video clip for audio track
             let audio_input = clips.iter().enumerate()
@@ -1003,7 +1270,7 @@ async fn process_node(
                 .map(|(i, _)| i + 1); // +1 because input 0 is color=black
 
             cmd.arg("-filter_complex").arg(&filter)
-                .arg("-map").arg("[out]");
+                .arg("-map").arg(map_label);
             if let Some(ai) = audio_input {
                 cmd.arg("-map").arg(format!("{}:a?", ai));
                 cmd.arg("-c:a").arg("aac");
@@ -1265,6 +1532,21 @@ async fn read_port_json(
             .ok_or_else(|| "Reference target not found".to_string())?,
         _ => raw_src,
     };
+
+    // NamedOutput: resolve through to NamedInput with matching name
+    if matches!(src_node.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
+        let port_name_str = &edge.from_port;
+        let named_input = graph.nodes.iter().find(|n| {
+            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if name == port_name_str)
+        }).ok_or_else(|| format!("Named input '{}' not found", port_name_str))?;
+        let ni_output = named_input.output.as_ref()
+            .ok_or_else(|| format!("Named input '{}' has no output", port_name_str))?;
+        let ni_path = storage.assets_dir(project_id).join(&ni_output.file_name);
+        return tokio::fs::read_to_string(&ni_path)
+            .await
+            .map_err(|e| format!("Read {}: {e}", ni_path.display()));
+    }
+
     let src_output = src_node
         .output
         .as_ref()
@@ -1298,6 +1580,29 @@ async fn read_port_value_f64(
             .ok_or_else(|| "Reference target not found".to_string())?,
         _ => raw_src,
     };
+
+    // NamedOutput: resolve through to NamedInput
+    if matches!(src_node.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
+        let port_name_str = &edge.from_port;
+        let named_input = graph.nodes.iter().find(|n| {
+            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if name == port_name_str)
+        });
+        if let Some(ni) = named_input {
+            if let Some(output) = &ni.output {
+                let path = storage.assets_dir(project_id).join(&output.file_name);
+                let content = tokio::fs::read_to_string(&path).await
+                    .map_err(|e| format!("Read named input: {e}"))?;
+                let json: serde_json::Value = serde_json::from_str(&content)
+                    .map_err(|e| format!("Parse: {e}"))?;
+                let field = format!("{}_ms", edge.from_port);
+                let val = json.get(&field).and_then(|v| v.as_f64())
+                    .or_else(|| json.get("value").and_then(|v| v.as_f64()))
+                    .or_else(|| json.as_f64());
+                return Ok(val);
+            }
+        }
+        return Ok(None);
+    }
 
     // Input nodes: read metadata from asset directly via from_port
     if let NodeKind::Input(_) = src_node.kind {
