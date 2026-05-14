@@ -382,29 +382,18 @@ async fn process_node(
                             crate::models::project::resolve_reference(&graph.nodes, source).unwrap_or(src),
                         _ => src,
                     };
-                    // NamedOutput: resolve through to NamedInput
-                    let actual_node = if matches!(resolved.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
-                        graph.nodes.iter().find(|n| {
-                            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if *name == edge.from_port)
-                        }).unwrap_or(resolved)
-                    } else {
-                        resolved
-                    };
-
-                    if let Some(output) = &actual_node.output {
+                    if let Some(output) = &resolved.output {
                         let json_path = storage.assets_dir(req.project_id).join(&output.file_name);
                         if let Ok(content) = tokio::fs::read_to_string(&json_path).await {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                                 let field = format!("{}_ms", edge.from_port);
                                 if let Some(v) = json.get(&field).and_then(|v| v.as_f64()) {
                                     times.push(v);
-                                } else if let Some(v) = json.get("start_ms").and_then(|v| v.as_f64()) {
-                                    // SubtitlePiece-like output: grab both start and end
-                                    times.push(v);
-                                    if let Some(e) = json.get("end_ms").and_then(|v| v.as_f64()) {
-                                        times.push(e);
-                                    }
                                 } else if let Some(v) = json.get("value").and_then(|v| v.as_f64()) {
+                                    times.push(v);
+                                } else if let Some(v) = json.get(&edge.from_port).and_then(|sub| sub.get("value")).and_then(|v| v.as_f64()) {
+                                    times.push(v);
+                                } else if let Some(v) = json.get(&edge.from_port).and_then(|v| v.as_f64()) {
                                     times.push(v);
                                 } else if let Some(v) = json.as_f64() {
                                     times.push(v);
@@ -701,16 +690,7 @@ async fn process_node(
                             crate::models::project::resolve_reference(&graph.nodes, source).unwrap_or(src),
                         _ => src,
                     };
-                    // NamedOutput: resolve through to NamedInput
-                    let actual_node = if matches!(resolved.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
-                        graph.nodes.iter().find(|n| {
-                            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if *name == edge.from_port)
-                        }).unwrap_or(resolved)
-                    } else {
-                        resolved
-                    };
-
-                    if let Some(output) = &actual_node.output {
+                    if let Some(output) = &resolved.output {
                         let json_path = storage.assets_dir(req.project_id).join(&output.file_name);
                         if let Ok(content) = tokio::fs::read_to_string(&json_path).await {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -929,7 +909,7 @@ async fn process_node(
                 Some(api_types::NodeSettings::NamedOutput { names }) => names.clone(),
                 _ => Vec::new(),
             };
-            // For each name, find the NamedInput and copy its output
+            // For each name, find the NamedInput and copy its parsed output
             let mut result = serde_json::Map::new();
             for name in &names {
                 let source = graph.nodes.iter().find(|n| {
@@ -939,7 +919,10 @@ async fn process_node(
                     if let Some(output) = &src.output {
                         let src_path = storage.assets_dir(req.project_id).join(&output.file_name);
                         if let Ok(content) = tokio::fs::read_to_string(&src_path).await {
-                            result.insert(name.clone(), serde_json::Value::String(content));
+                            // Parse as JSON value, not store as string
+                            let val = serde_json::from_str::<serde_json::Value>(&content)
+                                .unwrap_or(serde_json::Value::String(content));
+                            result.insert(name.clone(), val);
                         }
                     }
                 }
@@ -1533,20 +1516,6 @@ async fn read_port_json(
         _ => raw_src,
     };
 
-    // NamedOutput: resolve through to NamedInput with matching name
-    if matches!(src_node.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
-        let port_name_str = &edge.from_port;
-        let named_input = graph.nodes.iter().find(|n| {
-            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if name == port_name_str)
-        }).ok_or_else(|| format!("Named input '{}' not found", port_name_str))?;
-        let ni_output = named_input.output.as_ref()
-            .ok_or_else(|| format!("Named input '{}' has no output", port_name_str))?;
-        let ni_path = storage.assets_dir(project_id).join(&ni_output.file_name);
-        return tokio::fs::read_to_string(&ni_path)
-            .await
-            .map_err(|e| format!("Read {}: {e}", ni_path.display()));
-    }
-
     let src_output = src_node
         .output
         .as_ref()
@@ -1580,29 +1549,6 @@ async fn read_port_value_f64(
             .ok_or_else(|| "Reference target not found".to_string())?,
         _ => raw_src,
     };
-
-    // NamedOutput: resolve through to NamedInput
-    if matches!(src_node.kind, NodeKind::Process(api_types::ProcessNodeKind::NamedOutput)) {
-        let port_name_str = &edge.from_port;
-        let named_input = graph.nodes.iter().find(|n| {
-            matches!(&n.settings, Some(api_types::NodeSettings::NamedInput { name }) if name == port_name_str)
-        });
-        if let Some(ni) = named_input {
-            if let Some(output) = &ni.output {
-                let path = storage.assets_dir(project_id).join(&output.file_name);
-                let content = tokio::fs::read_to_string(&path).await
-                    .map_err(|e| format!("Read named input: {e}"))?;
-                let json: serde_json::Value = serde_json::from_str(&content)
-                    .map_err(|e| format!("Parse: {e}"))?;
-                let field = format!("{}_ms", edge.from_port);
-                let val = json.get(&field).and_then(|v| v.as_f64())
-                    .or_else(|| json.get("value").and_then(|v| v.as_f64()))
-                    .or_else(|| json.as_f64());
-                return Ok(val);
-            }
-        }
-        return Ok(None);
-    }
 
     // Input nodes: read metadata from asset directly via from_port
     if let NodeKind::Input(_) = src_node.kind {
@@ -1642,12 +1588,15 @@ async fn read_port_value_f64(
         .map_err(|e| format!("Read {}: {e}", json_path.display()))?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Parse JSON: {e}"))?;
-    // Try "{from_port}_ms" (for SpeechBounds), then "value" (for Scalar/Math)
+    // Try "{from_port}_ms" (for SpeechBounds), then "value" (for Scalar/Math/NamedInput),
+    // then json[from_port]["value"] (for NamedOutput multi-port)
     let field = format!("{}_ms", edge.from_port);
     let val = json
         .get(&field)
         .and_then(|v| v.as_f64())
-        .or_else(|| json.get("value").and_then(|v| v.as_f64()));
+        .or_else(|| json.get("value").and_then(|v| v.as_f64()))
+        .or_else(|| json.get(&edge.from_port).and_then(|v| v.get("value")).and_then(|v| v.as_f64()))
+        .or_else(|| json.get(&edge.from_port).and_then(|v| v.as_f64()));
     Ok(val)
 }
 
@@ -1680,10 +1629,11 @@ fn resolve_input_file(
                 .as_ref()
                 .ok_or_else(|| "Upstream processing node has no output yet".to_string())?;
             let ext = match pk.produced_output() {
-                api_types::NodeOutputKind::Audio => "wav",
-                api_types::NodeOutputKind::Json => "json",
-                api_types::NodeOutputKind::Video => "mp4",
-                api_types::NodeOutputKind::Image => "png",
+                api_types::PortType::Audio => "wav",
+                api_types::PortType::Video => "mp4",
+                api_types::PortType::Image => "png",
+                api_types::PortType::Number | api_types::PortType::SubtitleSegments
+                | api_types::PortType::ClipDescriptor | api_types::PortType::AssSubtitles => "json",
             };
             let path = storage.node_output_path(project_id, node.id, ext);
             let cache_part = output.cache_key.clone();

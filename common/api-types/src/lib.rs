@@ -179,59 +179,59 @@ impl ProcessNodeKind {
         }
     }
 
-    pub fn accepted_input(&self) -> NodeOutputKind {
+    pub fn accepted_input(&self) -> PortType {
         match self {
-            ProcessNodeKind::ExtractAudio => NodeOutputKind::Video,
-            ProcessNodeKind::DetectSilence => NodeOutputKind::Audio,
-            ProcessNodeKind::DetectSubtitles => NodeOutputKind::Audio,
-            ProcessNodeKind::SpeechBounds => NodeOutputKind::Audio,
-            ProcessNodeKind::TrimAudio => NodeOutputKind::Audio,
-            ProcessNodeKind::TrimVideo => NodeOutputKind::Video,
-            ProcessNodeKind::Scalar => NodeOutputKind::Json,
-            ProcessNodeKind::Spline => NodeOutputKind::Json, // no input
-            ProcessNodeKind::Clip => NodeOutputKind::Json,
-            ProcessNodeKind::Mux => NodeOutputKind::Video,
+            ProcessNodeKind::ExtractAudio => PortType::Video,
+            ProcessNodeKind::DetectSilence => PortType::Audio,
+            ProcessNodeKind::DetectSubtitles => PortType::Audio,
+            ProcessNodeKind::SpeechBounds => PortType::Audio,
+            ProcessNodeKind::TrimAudio => PortType::Audio,
+            ProcessNodeKind::TrimVideo => PortType::Video,
+            ProcessNodeKind::Scalar => PortType::Number,
+            ProcessNodeKind::Spline => PortType::Number,
+            ProcessNodeKind::Clip => PortType::Video,
+            ProcessNodeKind::Mux => PortType::Video,
             ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
-            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => NodeOutputKind::Json,
-            ProcessNodeKind::Map => NodeOutputKind::Json,
-            ProcessNodeKind::SubgraphInput => NodeOutputKind::Json, // type configured in settings
-            ProcessNodeKind::SubgraphOutput => NodeOutputKind::Json,
-            ProcessNodeKind::Reduce => NodeOutputKind::Json,
-            ProcessNodeKind::AssBuilder => NodeOutputKind::Json,
-            ProcessNodeKind::SubtitlePiece => NodeOutputKind::Json,
-            ProcessNodeKind::Overlay => NodeOutputKind::Image,
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => PortType::Number,
+            ProcessNodeKind::Map => PortType::Number,
+            ProcessNodeKind::SubgraphInput => PortType::Number,
+            ProcessNodeKind::SubgraphOutput => PortType::Number,
+            ProcessNodeKind::Reduce => PortType::Number,
+            ProcessNodeKind::AssBuilder => PortType::SubtitleSegments,
+            ProcessNodeKind::SubtitlePiece => PortType::SubtitleSegments,
+            ProcessNodeKind::Overlay => PortType::Image,
             ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
-            | ProcessNodeKind::AddBorder => NodeOutputKind::Image,
-            ProcessNodeKind::SubtitleTrack => NodeOutputKind::Json,
-            ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => NodeOutputKind::Json,
+            | ProcessNodeKind::AddBorder => PortType::Image,
+            ProcessNodeKind::SubtitleTrack => PortType::SubtitleSegments,
+            ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => PortType::Number,
         }
     }
 
-    pub fn produced_output(&self) -> NodeOutputKind {
+    pub fn produced_output(&self) -> PortType {
         match self {
-            ProcessNodeKind::ExtractAudio => NodeOutputKind::Audio,
-            ProcessNodeKind::DetectSilence => NodeOutputKind::Json,
-            ProcessNodeKind::DetectSubtitles => NodeOutputKind::Json,
-            ProcessNodeKind::SpeechBounds => NodeOutputKind::Json,
-            ProcessNodeKind::TrimAudio => NodeOutputKind::Audio,
-            ProcessNodeKind::TrimVideo => NodeOutputKind::Video,
-            ProcessNodeKind::Scalar => NodeOutputKind::Json,
-            ProcessNodeKind::Spline => NodeOutputKind::Json,
-            ProcessNodeKind::Clip => NodeOutputKind::Json,
-            ProcessNodeKind::Mux => NodeOutputKind::Video,
+            ProcessNodeKind::ExtractAudio => PortType::Audio,
+            ProcessNodeKind::DetectSilence => PortType::Number, // silence intervals
+            ProcessNodeKind::DetectSubtitles => PortType::SubtitleSegments,
+            ProcessNodeKind::SpeechBounds => PortType::Number,
+            ProcessNodeKind::TrimAudio => PortType::Audio,
+            ProcessNodeKind::TrimVideo => PortType::Video,
+            ProcessNodeKind::Scalar => PortType::Number,
+            ProcessNodeKind::Spline => PortType::Number,
+            ProcessNodeKind::Clip => PortType::ClipDescriptor,
+            ProcessNodeKind::Mux => PortType::Video,
             ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
-            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => NodeOutputKind::Json,
-            ProcessNodeKind::Map => NodeOutputKind::Json,
-            ProcessNodeKind::SubgraphInput => NodeOutputKind::Json,
-            ProcessNodeKind::SubgraphOutput => NodeOutputKind::Json,
-            ProcessNodeKind::Reduce => NodeOutputKind::Json,
-            ProcessNodeKind::AssBuilder => NodeOutputKind::Json,
-            ProcessNodeKind::SubtitlePiece => NodeOutputKind::Json,
-            ProcessNodeKind::Overlay => NodeOutputKind::Json,
+            | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => PortType::Number,
+            ProcessNodeKind::Map => PortType::Number,
+            ProcessNodeKind::SubgraphInput => PortType::Number,
+            ProcessNodeKind::SubgraphOutput => PortType::Number,
+            ProcessNodeKind::Reduce => PortType::Number,
+            ProcessNodeKind::AssBuilder => PortType::AssSubtitles,
+            ProcessNodeKind::SubtitlePiece => PortType::SubtitleSegments,
+            ProcessNodeKind::Overlay => PortType::ClipDescriptor,
             ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
-            | ProcessNodeKind::AddBorder => NodeOutputKind::Image,
-            ProcessNodeKind::SubtitleTrack => NodeOutputKind::Json,
-            ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => NodeOutputKind::Json,
+            | ProcessNodeKind::AddBorder => PortType::Image,
+            ProcessNodeKind::SubtitleTrack => PortType::AssSubtitles,
+            ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => PortType::Number,
         }
     }
 
@@ -580,33 +580,39 @@ impl NodeSettings {
 
 /// Describes the semantic type of a node's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NodeOutputKind {
+pub enum PortType {
+    Number,
     Video,
     Audio,
     Image,
-    Json,
+    SubtitleSegments,
+    ClipDescriptor,
+    AssSubtitles,
 }
+
+// Keep old name as alias for backward compatibility during migration
+pub type NodeOutputKind = PortType;
 
 impl NodeKind {
     pub fn output_ports(&self) -> Vec<PortDef> {
         match self {
             NodeKind::Input(InputNodeKind::Video) => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Video },
-                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "duration".into(), kind: PortType::Number },
+                PortDef { name: "width".into(), kind: PortType::Number },
+                PortDef { name: "height".into(), kind: PortType::Number },
             ],
             NodeKind::Input(InputNodeKind::Audio) => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Audio },
-                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "duration".into(), kind: PortType::Number },
             ],
             NodeKind::Input(InputNodeKind::Image) => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Image },
-                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "width".into(), kind: PortType::Number },
+                PortDef { name: "height".into(), kind: PortType::Number },
             ],
             NodeKind::Input(InputNodeKind::VideoArray) => vec![
-                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+                PortDef { name: String::new(), kind: PortType::Number },
             ],
             NodeKind::Process(pk) => pk.output_ports(),
             NodeKind::Reference { .. } => vec![], // resolved dynamically via source node
@@ -629,9 +635,9 @@ impl NodeKind {
             NodeKind::Input(InputNodeKind::Video) => NodeOutputKind::Video,
             NodeKind::Input(InputNodeKind::Audio) => NodeOutputKind::Audio,
             NodeKind::Input(InputNodeKind::Image) => NodeOutputKind::Image,
-            NodeKind::Input(InputNodeKind::VideoArray) => NodeOutputKind::Json,
+            NodeKind::Input(InputNodeKind::VideoArray) => PortType::Number,
             NodeKind::Process(p) => p.produced_output(),
-            NodeKind::Reference { .. } => NodeOutputKind::Json, // resolved dynamically
+            NodeKind::Reference { .. } => PortType::Number, // resolved dynamically
         }
     }
 }
@@ -724,31 +730,37 @@ impl ProcessNodeKind {
     pub fn output_ports(&self) -> Vec<PortDef> {
         match self {
             ProcessNodeKind::SpeechBounds => vec![
-                PortDef { name: "start".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "end".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "start".into(), kind: PortType::Number },
+                PortDef { name: "end".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::ExtractAudio | ProcessNodeKind::TrimAudio => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Audio },
-                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "duration".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::TrimVideo => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Video },
-                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "duration".into(), kind: PortType::Number },
+                PortDef { name: "width".into(), kind: PortType::Number },
+                PortDef { name: "height".into(), kind: PortType::Number },
             ],
-            ProcessNodeKind::DetectSilence
-            | ProcessNodeKind::DetectSubtitles => vec![
-                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+            ProcessNodeKind::DetectSilence => vec![
+                PortDef { name: String::new(), kind: PortType::Number },
             ],
-            ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::Clip
+            ProcessNodeKind::DetectSubtitles => vec![
+                PortDef { name: String::new(), kind: PortType::SubtitleSegments },
+            ],
+            ProcessNodeKind::Scalar | ProcessNodeKind::Spline
             | ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
             | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide
             | ProcessNodeKind::SubgraphInput | ProcessNodeKind::SubgraphOutput
-            | ProcessNodeKind::Reduce | ProcessNodeKind::AssBuilder
-            | ProcessNodeKind::Overlay | ProcessNodeKind::SubtitleTrack
-            | ProcessNodeKind::NamedInput => vec![
-                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+            | ProcessNodeKind::Reduce | ProcessNodeKind::NamedInput => vec![
+                PortDef { name: String::new(), kind: PortType::Number },
+            ],
+            ProcessNodeKind::Clip | ProcessNodeKind::Overlay => vec![
+                PortDef { name: String::new(), kind: PortType::ClipDescriptor },
+            ],
+            ProcessNodeKind::AssBuilder | ProcessNodeKind::SubtitleTrack => vec![
+                PortDef { name: String::new(), kind: PortType::AssSubtitles },
             ],
             ProcessNodeKind::Mux => vec![
                 PortDef { name: String::new(), kind: NodeOutputKind::Video },
@@ -758,12 +770,12 @@ impl ProcessNodeKind {
                 PortDef { name: String::new(), kind: NodeOutputKind::Image },
             ],
             ProcessNodeKind::SubtitlePiece => vec![
-                PortDef { name: "start".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "end".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "segments".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "start".into(), kind: PortType::Number },
+                PortDef { name: "end".into(), kind: PortType::Number },
+                PortDef { name: "segments".into(), kind: PortType::SubtitleSegments },
             ],
             ProcessNodeKind::Map => vec![
-                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+                PortDef { name: String::new(), kind: PortType::Number },
             ],
             ProcessNodeKind::NamedOutput => vec![], // dynamic, based on settings
         }
@@ -773,7 +785,7 @@ impl ProcessNodeKind {
         match self {
             ProcessNodeKind::NamedOutput => {
                 if let Some(NodeSettings::NamedOutput { names }) = settings {
-                    names.iter().map(|n| PortDef { name: n.clone(), kind: NodeOutputKind::Json }).collect()
+                    names.iter().map(|n| PortDef { name: n.clone(), kind: PortType::Number }).collect()
                 } else {
                     vec![]
                 }
@@ -813,54 +825,54 @@ impl ProcessNodeKind {
             ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::NamedOutput => vec![],
             ProcessNodeKind::TrimAudio => vec![
                 PortDef { name: "audio".into(), kind: NodeOutputKind::Audio },
-                PortDef { name: "start".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "end".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "start".into(), kind: PortType::Number },
+                PortDef { name: "end".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::TrimVideo => vec![
                 PortDef { name: "video".into(), kind: NodeOutputKind::Video },
-                PortDef { name: "start".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "end".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "start".into(), kind: PortType::Number },
+                PortDef { name: "end".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::MathAdd | ProcessNodeKind::MathSubtract
             | ProcessNodeKind::MathMultiply | ProcessNodeKind::MathDivide => vec![
-                PortDef { name: "a".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "b".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "a".into(), kind: PortType::Number },
+                PortDef { name: "b".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::Map => vec![
-                PortDef { name: "input".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "input".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::SubgraphInput => vec![],
             ProcessNodeKind::SubgraphOutput => vec![
-                PortDef { name: String::new(), kind: NodeOutputKind::Json },
+                PortDef { name: String::new(), kind: PortType::Number },
             ],
             ProcessNodeKind::AssBuilder => vec![
-                PortDef { name: "subtitles".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "subtitles".into(), kind: PortType::AssSubtitles },
             ],
             ProcessNodeKind::SubtitlePiece => vec![
-                PortDef { name: "subtitles".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "subtitles".into(), kind: PortType::AssSubtitles },
             ],
             ProcessNodeKind::Overlay => vec![
                 PortDef { name: "image".into(), kind: NodeOutputKind::Image },
-                PortDef { name: "times".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "times".into(), kind: PortType::Number },
                 PortDef { name: "background".into(), kind: NodeOutputKind::Video },
             ],
             ProcessNodeKind::SubtitleTrack => vec![
-                PortDef { name: "subs".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "subs".into(), kind: PortType::Number },
                 PortDef { name: "video".into(), kind: NodeOutputKind::Video },
             ],
             ProcessNodeKind::Reduce => vec![
-                PortDef { name: "array".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "array".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::Clip => vec![
                 PortDef { name: "media".into(), kind: NodeOutputKind::Video },
-                PortDef { name: "times".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "times".into(), kind: PortType::Number },
             ],
             ProcessNodeKind::Mux => vec![
-                PortDef { name: "duration".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "width".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "height".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "clips".into(), kind: NodeOutputKind::Json },
-                PortDef { name: "subtitles".into(), kind: NodeOutputKind::Json },
+                PortDef { name: "duration".into(), kind: PortType::Number },
+                PortDef { name: "width".into(), kind: PortType::Number },
+                PortDef { name: "height".into(), kind: PortType::Number },
+                PortDef { name: "clips".into(), kind: PortType::ClipDescriptor },
+                PortDef { name: "subtitles".into(), kind: PortType::AssSubtitles },
             ],
             _ => vec![PortDef {
                 name: String::new(),

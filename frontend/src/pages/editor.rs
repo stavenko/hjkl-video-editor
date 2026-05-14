@@ -2595,7 +2595,6 @@ fn NodeView(
                                             view! { <div class="overlay-empty">"Запустите ноду для загрузки точек"</div> }.into_view()
                                         } else {
                                             let bg_stored = clip_bg_stored;
-                                            let img_stored = clip_img_stored;
                                             let total = kfs.len();
                                             kfs.into_iter().enumerate().map(move |(i, kf)| {
                                                 let interp_label = match kf.interpolation {
@@ -2806,7 +2805,8 @@ fn NodeView(
                                             <AudioPlayer wave_url=wave_url file_url=file_src loop_clip_base=loop_base />
                                         }.into_view()
                                     }
-                                    api_types::NodeOutputKind::Json => {
+                                    api_types::PortType::Number | api_types::PortType::SubtitleSegments
+                                    | api_types::PortType::ClipDescriptor | api_types::PortType::AssSubtitles => {
                                         match pk {
                                     ProcessNodeKind::Clip => {
                                         // Clip has video preview despite Json output
