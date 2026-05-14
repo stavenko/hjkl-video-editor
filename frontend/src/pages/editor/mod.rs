@@ -1,7 +1,8 @@
 mod node_view;
+mod nodes;
 use node_view::NodeView;
 
-use api_types::{Edge, InputNodeKind, Node, NodeKind, Position, ProcessNodeKind, ProjectDetail, TaskStatus};
+use api_types::{Edge, InputNodeKind, Node, NodeKind, Position, ProcessNodeKind, ProjectDetail};
 use leptos::*;
 use leptos_router::{use_params_map, A};
 use uuid::Uuid;
