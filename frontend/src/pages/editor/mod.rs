@@ -9,12 +9,37 @@ use uuid::Uuid;
 use wasm_bindgen::JsCast;
 use web_sys::{MouseEvent, WheelEvent};
 
+use std::collections::HashSet;
+
 use crate::components::CanvasTransform;
 use crate::components::helpers::*;
 use crate::components::video_player::VideoPlayerModal;
 use crate::components::modals::{AddNodeModal, NodeListModal, JsonModal};
 use crate::components::subtitle_track::{SubtitleStyleModal, SubtitleSegmentModal};
 use crate::services::{project_service, upload_service};
+
+fn apply_position_updates(
+    updates: &[(Uuid, Position)],
+    nodes: RwSignal<Vec<Node>>,
+    project_id: Signal<Option<Uuid>>,
+) {
+    // Update locally — triggers node_signal sync in NodeView
+    let updates_clone = updates.to_vec();
+    nodes.update(|ns| {
+        for (id, pos) in &updates_clone {
+            if let Some(n) = ns.iter_mut().find(|n| n.id == *id) {
+                n.position = *pos;
+            }
+        }
+    });
+    // Persist to server in background
+    let Some(pid) = project_id.get_untracked() else { return };
+    spawn_local(async move {
+        for (id, pos) in updates_clone {
+            let _ = project_service::update_node_position(pid, id, pos).await;
+        }
+    });
+}
 
 #[derive(Clone, Copy)]
 struct DragState {
@@ -58,6 +83,16 @@ pub fn EditorPage() -> impl IntoView {
     let placing_pos = create_rw_signal::<Option<(f32, f32)>>(None);
     let drag_state = create_rw_signal::<Option<DragState>>(None);
     let drag_pos = create_rw_signal::<Option<(Uuid, Position)>>(None);
+    let selected_nodes = create_rw_signal::<HashSet<Uuid>>(HashSet::new());
+    // Selection rectangle: (start_x, start_y, current_x, current_y) in canvas coords
+    let selection_rect = create_rw_signal::<Option<(f32, f32, f32, f32)>>(None);
+    let selection_start_screen = create_rw_signal::<Option<(i32, i32)>>(None);
+    // Template save: (screen_x, screen_y) for context menu
+    let template_ctx_menu = create_rw_signal::<Option<(f64, f64)>>(None);
+    let template_name_prompt = create_rw_signal(false);
+    let template_name_input = create_rw_signal(String::new());
+    // Template placement: (template_name, bbox_w, bbox_h, inputs)
+    let placing_template = create_rw_signal::<Option<(String, f32, f32, Vec<api_types::TemplatePort>)>>(None);
     let canvas_ref = create_node_ref::<html::Div>();
     let cam = create_rw_signal({
         let key = project_id.get_untracked()
@@ -174,6 +209,10 @@ pub fn EditorPage() -> impl IntoView {
                     placing_phrase.set(None);
                     placing_pos.set(None);
                 }
+                if placing_template.get_untracked().is_some() {
+                    placing_template.set(None);
+                    placing_pos.set(None);
+                }
             }
         });
         leptos::document()
@@ -276,7 +315,7 @@ pub fn EditorPage() -> impl IntoView {
     };
 
     let on_canvas_mouse_move = move |ev: MouseEvent| {
-        if placing_kind.get_untracked().is_some() || placing_phrase.get_untracked().is_some() {
+        if placing_kind.get_untracked().is_some() || placing_phrase.get_untracked().is_some() || placing_template.get_untracked().is_some() {
             let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
             placing_pos.set(Some((cx, cy)));
             return;
@@ -286,18 +325,75 @@ pub fn EditorPage() -> impl IntoView {
             connect_mouse.set(Some((cx, cy)));
             return;
         }
-        let Some(state) = drag_state.get_untracked() else {
+        if let Some(state) = drag_state.get_untracked() {
+            let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
+            let new_pos = Position {
+                x: cx - state.pointer_offset_x,
+                y: cy - state.pointer_offset_y,
+            };
+            drag_pos.set(Some((state.node_id, new_pos)));
             return;
-        };
-        let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
-        let new_pos = Position {
-            x: cx - state.pointer_offset_x,
-            y: cy - state.pointer_offset_y,
-        };
-        drag_pos.set(Some((state.node_id, new_pos)));
+        }
+        // Update selection rectangle
+        if let Some((sx, sy, _, _)) = selection_rect.get_untracked() {
+            let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
+            selection_rect.set(Some((sx, sy, cx, cy)));
+        }
     };
 
-    let on_mouse_up = move |_ev: MouseEvent| {
+    let on_mouse_up = move |ev: MouseEvent| {
+        // Finalize selection rectangle
+        if let Some((sx, sy, ex, ey)) = selection_rect.get_untracked() {
+            selection_rect.set(None);
+            selection_start_screen.set(None);
+            let min_x = sx.min(ex);
+            let max_x = sx.max(ex);
+            let min_y = sy.min(ey);
+            let max_y = sy.max(ey);
+            // Only select if dragged at least 5px (avoid accidental click)
+            if (max_x - min_x) > 5.0 || (max_y - min_y) > 5.0 {
+                let ns = nodes.get_untracked();
+                let mut sel = if ev.shift_key() {
+                    selected_nodes.get_untracked()
+                } else {
+                    HashSet::new()
+                };
+                for n in &ns {
+                    let nx = n.position.x;
+                    let ny = n.position.y;
+                    if nx >= min_x && nx <= max_x && ny >= min_y && ny <= max_y {
+                        sel.insert(n.id);
+                    }
+                }
+                selected_nodes.set(sel);
+                return;
+            }
+        }
+        // Template placement — create Template node
+        if let Some((tpl_name, bbox_w, bbox_h, inputs)) = placing_template.get_untracked() {
+            let Some((cx, cy)) = placing_pos.get_untracked() else { return };
+            let Some(pid) = project_id.get_untracked() else { return };
+            placing_template.set(None);
+            placing_pos.set(None);
+            let position = Position { x: cx, y: cy };
+            let kind = NodeKind::Process(ProcessNodeKind::Template);
+            let parent = editing_map.get_untracked();
+            spawn_local(async move {
+                match project_service::create_node(pid, kind, position, parent).await {
+                    Ok(out) => {
+                        let node_id = out.node.id;
+                        let settings = api_types::NodeSettings::Template {
+                            template_name: tpl_name,
+                            bbox_w, bbox_h, inputs,
+                        };
+                        let _ = project_service::update_node_settings(pid, node_id, settings).await;
+                        reload();
+                    }
+                    Err(e) => error.set(Some(e.to_string())),
+                }
+            });
+            return;
+        }
         if placing_kind.get_untracked().is_some() {
             confirm_placement();
             return;
@@ -409,6 +505,25 @@ pub fn EditorPage() -> impl IntoView {
             <div
                 class="canvas"
                 node_ref=canvas_ref
+                on:mousedown=move |ev: MouseEvent| {
+                    // Only start selection rect on direct canvas click (not on a node)
+                    if ev.button() != 0 { return; }
+                    if placing_kind.get_untracked().is_some() || placing_phrase.get_untracked().is_some() { return; }
+                    if connecting_from.get_untracked().is_some() { return; }
+                    // Start selection rectangle
+                    let (cx, cy) = screen_to_canvas(ev.client_x(), ev.client_y());
+                    selection_rect.set(Some((cx, cy, cx, cy)));
+                    selection_start_screen.set(Some((ev.client_x(), ev.client_y())));
+                    if !ev.shift_key() {
+                        selected_nodes.set(HashSet::new());
+                    }
+                }
+                on:contextmenu=move |ev: MouseEvent| {
+                    if !selected_nodes.get_untracked().is_empty() {
+                        ev.prevent_default();
+                        template_ctx_menu.set(Some((ev.client_x() as f64, ev.client_y() as f64)));
+                    }
+                }
                 on:mousemove=on_canvas_mouse_move
                 on:mouseup=on_mouse_up
                 on:mouseleave=on_mouse_up
@@ -552,6 +667,7 @@ pub fn EditorPage() -> impl IntoView {
                                 connecting_from_port=connecting_from_port
                                 player_src=player_src
                                 json_modal=json_modal
+                                selected_nodes=selected_nodes
                                 on_drag_start=start_drag
                                 on_delete=on_delete_node
                                 on_connect_complete=on_connect_complete
@@ -596,6 +712,18 @@ pub fn EditorPage() -> impl IntoView {
                             </div>
                         }.into_view());
                     }
+                    if let Some((ref name, bw, bh, _)) = placing_template.get() {
+                        return Some(view! {
+                            <div
+                                class="node ghost process"
+                                style=format!("left:{}px;top:{}px;width:{}px;height:{}px;opacity:0.6;", cx, cy, bw, bh)
+                            >
+                                <div class="node-header">
+                                    <span class="node-kind-badge">{format!("Шаблон: {}", name)}</span>
+                                </div>
+                            </div>
+                        }.into_view());
+                    }
                     if let Some((_, ref phrase)) = placing_phrase.get() {
                         return Some(view! {
                             <div
@@ -615,6 +743,21 @@ pub fn EditorPage() -> impl IntoView {
                     }
                     None
                 }}
+
+                // Selection rectangle
+                {move || {
+                    let (sx, sy, ex, ey) = selection_rect.get()?;
+                    let left = sx.min(ex);
+                    let top = sy.min(ey);
+                    let w = (ex - sx).abs();
+                    let h = (ey - sy).abs();
+                    Some(view! {
+                        <div class="selection-rect" style=format!(
+                            "left:{}px;top:{}px;width:{}px;height:{}px;",
+                            left, top, w, h
+                        )/>
+                    })
+                }}
                 </div>
             </div>
 
@@ -622,6 +765,31 @@ pub fn EditorPage() -> impl IntoView {
                 <AddNodeModal
                     on_select=on_create_node
                     on_close=move || add_modal_open.set(false)
+                    on_template=move |template_name: String| {
+                        add_modal_open.set(false);
+                        // Load template to get bbox and inputs, then enter placement mode
+                        spawn_local(async move {
+                            match project_service::list_templates().await {
+                                Ok(out) => {
+                                    if let Some(t) = out.templates.into_iter().find(|t| t.name == template_name) {
+                                        // Compute bounding box from template nodes
+                                        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                                        for tn in &t.nodes {
+                                            min_x = min_x.min(tn.relative_position.x);
+                                            min_y = min_y.min(tn.relative_position.y);
+                                            max_x = max_x.max(tn.relative_position.x + 240.0); // node width
+                                            max_y = max_y.max(tn.relative_position.y + 100.0); // approx node height
+                                        }
+                                        let bbox_w = (max_x - min_x).max(240.0);
+                                        let bbox_h = (max_y - min_y).max(100.0);
+                                        placing_template.set(Some((template_name, bbox_w, bbox_h, t.inputs)));
+                                        placing_pos.set(None);
+                                    }
+                                }
+                                Err(e) => error.set(Some(e.to_string())),
+                            }
+                        });
+                    }
                     inside_subgraph=Signal::derive(move || editing_map.get().is_some())
                 />
             </Show>
@@ -862,6 +1030,141 @@ pub fn EditorPage() -> impl IntoView {
                     />
                 }
             })}
+
+            // Template context menu (right-click on selected nodes)
+            {move || template_ctx_menu.get().map(|(x, y)| {
+                view! {
+                    <div class="subtrack-ctx-backdrop" on:click=move |_| template_ctx_menu.set(None)>
+                        <div class="subtrack-ctx-menu" style=format!("left:{}px;top:{}px;", x, y)
+                            on:click=|ev: MouseEvent| ev.stop_propagation()
+                        >
+                            <button class="subtrack-ctx-item" on:click=move |_| {
+                                template_ctx_menu.set(None);
+                                template_name_input.set(String::new());
+                                template_name_prompt.set(true);
+                            }>"Сохранить как шаблон"</button>
+                            <button class="subtrack-ctx-item" on:click=move |_| {
+                                template_ctx_menu.set(None);
+                                let sel = selected_nodes.get_untracked();
+                                let ns = nodes.get_untracked();
+                                let mut sel_nodes: Vec<_> = ns.iter().filter(|n| sel.contains(&n.id)).cloned().collect();
+                                if sel_nodes.len() < 2 { return; }
+                                sel_nodes.sort_by(|a, b| a.position.y.partial_cmp(&b.position.y).unwrap());
+                                let min_y = sel_nodes.first().unwrap().position.y;
+                                let max_y = sel_nodes.last().unwrap().position.y;
+                                let step = (max_y - min_y) / (sel_nodes.len() - 1) as f32;
+                                let updates: Vec<_> = sel_nodes.iter().enumerate()
+                                    .map(|(i, n)| (n.id, Position { x: n.position.x, y: min_y + step * i as f32 }))
+                                    .collect();
+                                apply_position_updates(&updates, nodes, project_id);
+                            }>"Упорядочить по Y"</button>
+                            <button class="subtrack-ctx-item" on:click=move |_| {
+                                template_ctx_menu.set(None);
+                                let sel = selected_nodes.get_untracked();
+                                let ns = nodes.get_untracked();
+                                let mut sel_nodes: Vec<_> = ns.iter().filter(|n| sel.contains(&n.id)).cloned().collect();
+                                if sel_nodes.len() < 2 { return; }
+                                sel_nodes.sort_by(|a, b| a.position.x.partial_cmp(&b.position.x).unwrap());
+                                let min_x = sel_nodes.first().unwrap().position.x;
+                                let max_x = sel_nodes.last().unwrap().position.x;
+                                let step = (max_x - min_x) / (sel_nodes.len() - 1) as f32;
+                                let updates: Vec<_> = sel_nodes.iter().enumerate()
+                                    .map(|(i, n)| (n.id, Position { x: min_x + step * i as f32, y: n.position.y }))
+                                    .collect();
+                                apply_position_updates(&updates, nodes, project_id);
+                            }>"Упорядочить по X"</button>
+                            <button class="subtrack-ctx-item" on:click=move |_| {
+                                template_ctx_menu.set(None);
+                                let sel = selected_nodes.get_untracked();
+                                let ns = nodes.get_untracked();
+                                let sel_nodes: Vec<_> = ns.iter().filter(|n| sel.contains(&n.id)).collect();
+                                if sel_nodes.is_empty() { return; }
+                                let avg_x = sel_nodes.iter().map(|n| n.position.x).sum::<f32>() / sel_nodes.len() as f32;
+                                let updates: Vec<_> = sel_nodes.iter()
+                                    .map(|n| (n.id, Position { x: avg_x, y: n.position.y }))
+                                    .collect();
+                                apply_position_updates(&updates, nodes, project_id);
+                            }>"Выровнять по Y"</button>
+                            <button class="subtrack-ctx-item" on:click=move |_| {
+                                template_ctx_menu.set(None);
+                                let sel = selected_nodes.get_untracked();
+                                let ns = nodes.get_untracked();
+                                let sel_nodes: Vec<_> = ns.iter().filter(|n| sel.contains(&n.id)).collect();
+                                if sel_nodes.is_empty() { return; }
+                                let avg_y = sel_nodes.iter().map(|n| n.position.y).sum::<f32>() / sel_nodes.len() as f32;
+                                let updates: Vec<_> = sel_nodes.iter()
+                                    .map(|n| (n.id, Position { x: n.position.x, y: avg_y }))
+                                    .collect();
+                                apply_position_updates(&updates, nodes, project_id);
+                            }>"Выровнять по X"</button>
+                            <button class="subtrack-ctx-item" style="color:#e55;" on:click=move |_| {
+                                template_ctx_menu.set(None);
+                                let ids: Vec<Uuid> = selected_nodes.get_untracked().into_iter().collect();
+                                let Some(pid) = project_id.get_untracked() else { return };
+                                let parent = editing_map.get_untracked();
+                                selected_nodes.set(HashSet::new());
+                                spawn_local(async move {
+                                    for id in ids {
+                                        let _ = project_service::delete_node(pid, id, parent).await;
+                                    }
+                                    reload();
+                                });
+                            }>"Удалить выделенные"</button>
+                        </div>
+                    </div>
+                }
+            })}
+
+            // Template name prompt
+            <Show when=move || template_name_prompt.get()>
+                <div class="modal-backdrop" on:click=move |_| template_name_prompt.set(false)>
+                    <div class="modal" on:click=|ev: MouseEvent| ev.stop_propagation() style="width:320px;">
+                        <div class="modal-header">"Имя шаблона"</div>
+                        <div class="modal-body">
+                            <input type="text" style="width:100%;padding:8px;font-size:14px;"
+                                placeholder="Название..."
+                                prop:value=move || template_name_input.get()
+                                on:input=move |ev| template_name_input.set(event_target_value(&ev))
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    if ev.key() == "Enter" {
+                                        let name = template_name_input.get_untracked();
+                                        if !name.trim().is_empty() {
+                                            let ids: Vec<Uuid> = selected_nodes.get_untracked().into_iter().collect();
+                                            let Some(pid) = project_id.get_untracked() else { return };
+                                            let parent = editing_map.get_untracked();
+                                            template_name_prompt.set(false);
+                                            spawn_local(async move {
+                                                match project_service::save_template(pid, name, ids, parent).await {
+                                                    Ok(_) => { selected_nodes.set(HashSet::new()); }
+                                                    Err(e) => error.set(Some(e.to_string())),
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            />
+                        </div>
+                        <div class="modal-footer">
+                            <button on:click=move |_| {
+                                let name = template_name_input.get_untracked();
+                                if !name.trim().is_empty() {
+                                    let ids: Vec<Uuid> = selected_nodes.get_untracked().into_iter().collect();
+                                    let Some(pid) = project_id.get_untracked() else { return };
+                                    let parent = editing_map.get_untracked();
+                                    template_name_prompt.set(false);
+                                    spawn_local(async move {
+                                        match project_service::save_template(pid, name, ids, parent).await {
+                                            Ok(_) => { selected_nodes.set(HashSet::new()); }
+                                            Err(e) => error.set(Some(e.to_string())),
+                                        }
+                                    });
+                                }
+                            }>"Сохранить"</button>
+                            <button on:click=move |_| template_name_prompt.set(false)>"Отмена"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
         </div>
     }
 }

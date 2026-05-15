@@ -3,7 +3,7 @@ use leptos::*;
 use uuid::Uuid;
 use web_sys::MouseEvent;
 
-use crate::components::overlay::OverlayKfEditor;
+use crate::components::clip::ClipKfEditor;
 use crate::services::project_service;
 
 pub fn clip_body(
@@ -20,6 +20,8 @@ pub fn clip_body(
     };
     let keyframes = create_rw_signal(kfs);
     let editing_idx = create_rw_signal::<Option<usize>>(None);
+
+
     let save_kfs = move || {
         let kfs = keyframes.get_untracked();
         let ns = node_signal.get_untracked();
@@ -38,12 +40,13 @@ pub fn clip_body(
         });
     };
 
-    // Find background video via edges
-    let clip_bg = {
-        let es = edges.get_untracked();
-        let ns_all = nodes.get_untracked();
+    // Find background video via edges (reactive — re-checks when edges/nodes change)
+    let node_id = n.id;
+    let clip_bg = create_memo(move |_| {
+        let es = edges.get();
+        let ns_all = nodes.get();
         es.iter()
-            .find(|e| e.to_node == n.id && (e.to_port == "media" || e.to_port.is_empty()))
+            .find(|e| e.to_node == node_id && (e.to_port == "media" || e.to_port.is_empty()))
             .and_then(|e| {
                 let src = ns_all.iter().find(|n| n.id == e.from_node)?;
                 let resolved = match src.kind {
@@ -59,10 +62,7 @@ pub fn clip_body(
                     .or_else(|| resolved.output.as_ref().and_then(|o| o.duration_ms.map(|d| d / 1000.0)));
                 Some((resolved.id, slug, dur))
             })
-    };
-    let clip_bg_stored = store_value(clip_bg);
-    let clip_img_url: Option<String> = None;
-    let clip_img_stored = store_value(clip_img_url);
+    });
 
     view! {
         <div class="overlay-editor"
@@ -74,7 +74,6 @@ pub fn clip_body(
                 if kfs.is_empty() {
                     view! { <div class="overlay-empty">"Запустите ноду для загрузки точек"</div> }.into_view()
                 } else {
-                    let bg_stored = clip_bg_stored;
                     let total = kfs.len();
                     kfs.into_iter().enumerate().map(move |(i, kf)| {
                         let interp_label = match kf.interpolation {
@@ -97,11 +96,10 @@ pub fn clip_body(
                                 <span class="overlay-kf-summary">{format!("x:{:.2} y:{:.2} s:{:.1} a:{:.1}", kf.x, kf.y, kf.scale, kf.alpha)}</span>
                             </div>
                             <Show when=move || editing_idx.get() == Some(i)>
-                                <OverlayKfEditor
+                                <ClipKfEditor
                                     index=i
                                     keyframes=keyframes
-                                    bg_info=bg_stored.get_value()
-                                    image_url=clip_img_stored.get_value()
+                                    bg_info=clip_bg.get()
                                     project_id=project_id
                                     on_change=save_kfs
                                 />

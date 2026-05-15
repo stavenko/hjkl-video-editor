@@ -15,6 +15,12 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub projects_root: PathBuf,
+    #[serde(default = "default_templates_root")]
+    pub templates_root: PathBuf,
+}
+
+fn default_templates_root() -> PathBuf {
+    PathBuf::from("./templates")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

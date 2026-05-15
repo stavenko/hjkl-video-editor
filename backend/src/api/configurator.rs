@@ -4,7 +4,9 @@ use crate::api::endpoints::{
     asset_thumbnail, asset_waveform, config_frontend, connect_nodes, disconnect_nodes, node_create,
     invalidate_node, node_delete, node_file, node_loop_clip, node_position, node_settings,
     node_thumbnail, project_get, projects_create, projects_delete, projects_list, projects_rename,
-    run_node, subtitle_preview, task_status, upload_begin, upload_chunk, upload_finalize,
+    run_node, subtitle_preview, task_status,
+    template_save, template_list, template_unpack, template_delete,
+    upload_begin, upload_chunk, upload_finalize,
 };
 
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
@@ -55,6 +57,13 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route("/run", web::post().to(run_node::handler))
             .route("/invalidate", web::post().to(invalidate_node::handler))
             .route("/task-status", web::post().to(task_status::handler)),
+    );
+    cfg.service(
+        web::scope("/api/templates")
+            .route("/save", web::post().to(template_save::handler))
+            .route("/list", web::post().to(template_list::handler))
+            .route("/unpack", web::post().to(template_unpack::handler))
+            .route("/delete", web::post().to(template_delete::handler)),
     );
     cfg.service(
         web::scope("/api/uploads")

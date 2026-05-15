@@ -3,6 +3,7 @@ pub mod video_player;
 pub mod modals;
 pub mod asset_view;
 pub mod subtitles_view;
+pub mod clip;
 pub mod overlay;
 pub mod subtitle_track;
 

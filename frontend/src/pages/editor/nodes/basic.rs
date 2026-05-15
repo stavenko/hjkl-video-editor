@@ -1,4 +1,4 @@
-use api_types::{Node, ProcessNodeKind, TaskStatus};
+use api_types::{Edge, Node, ProcessNodeKind, TaskStatus};
 use leptos::*;
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
@@ -375,5 +375,122 @@ pub fn generic_process_body(
     view! {
         {output_view}
         {status_view}
+    }.into_view()
+}
+
+pub fn template_body(
+    node_signal: RwSignal<Node>,
+    project_id: Uuid,
+    node_id: Uuid,
+    nodes: RwSignal<Vec<Node>>,
+    edges: RwSignal<Vec<Edge>>,
+    on_delete: impl Fn(Uuid) + Copy + 'static,
+) -> impl IntoView {
+    let n = node_signal.get_untracked();
+    let (tpl_name, bbox_w, bbox_h) = match &n.settings {
+        Some(api_types::NodeSettings::Template { template_name, bbox_w, bbox_h, .. }) =>
+            (template_name.clone(), *bbox_w, *bbox_h),
+        _ => (String::new(), 0.0, 0.0),
+    };
+
+    let unpack_loading = create_rw_signal(false);
+
+    let on_unpack = move |ev: MouseEvent| {
+        ev.stop_propagation();
+        if unpack_loading.get_untracked() { return; }
+        unpack_loading.set(true);
+
+        let n = node_signal.get_untracked();
+        let tpl_name = match &n.settings {
+            Some(api_types::NodeSettings::Template { template_name, .. }) => template_name.clone(),
+            _ => return,
+        };
+        let pos = n.position;
+
+        spawn_local(async move {
+            match crate::services::project_service::unpack_template(
+                project_id, tpl_name, pos, None,
+            ).await {
+                Ok(out) => {
+                    let template_node_id = node_id;
+
+                    // Rewire external connections using id_map
+                    // For each edge connected TO the template node, find the
+                    // internal target node via template inputs + id_map
+                    let template_inputs: Vec<api_types::TemplatePort> = match &n.settings {
+                        Some(api_types::NodeSettings::Template { inputs, .. }) => inputs.clone(),
+                        _ => vec![],
+                    };
+
+                    let cur_edges = edges.get_untracked();
+                    let external_edges: Vec<_> = cur_edges.iter()
+                        .filter(|e| e.to_node == template_node_id)
+                        .cloned()
+                        .collect();
+
+                    // Rewire: each external edge → fan out to all targets in the matching template port
+                    let mut rewired_edges = Vec::new();
+                    for ext_edge in &external_edges {
+                        if let Some(tpl_port) = template_inputs.iter().find(|p| p.port_name == ext_edge.to_port) {
+                            for target in &tpl_port.targets {
+                                if let Some(new_id) = out.id_map.get(&target.node_id) {
+                                    rewired_edges.push(api_types::Edge {
+                                        from_node: ext_edge.from_node,
+                                        from_port: ext_edge.from_port.clone(),
+                                        to_node: *new_id,
+                                        to_port: target.port_name.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Connect rewired edges on server
+                    let pid = project_id;
+                    for re in &rewired_edges {
+                        let _ = crate::services::project_service::connect_nodes(
+                            pid, re.from_node, re.from_port.clone(),
+                            re.to_node, re.to_port.clone(), None,
+                        ).await;
+                    }
+
+                    // Delete template node on server
+                    let _ = crate::services::project_service::delete_node(pid, template_node_id, None).await;
+
+                    // Reload to get clean state
+                    nodes.update(|ns| {
+                        ns.retain(|n| n.id != template_node_id);
+                        for new_node in &out.nodes { ns.push(new_node.clone()); }
+                    });
+                    edges.update(|es| {
+                        es.retain(|e| e.to_node != template_node_id && e.from_node != template_node_id);
+                        for new_edge in &out.edges { es.push(new_edge.clone()); }
+                        for re in rewired_edges { es.push(re); }
+                    });
+
+                    unpack_loading.set(false);
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Unpack failed: {}", e).into());
+                    unpack_loading.set(false);
+                }
+            }
+        });
+    };
+
+    view! {
+        <div class="node-body" style=format!("min-height:{}px;", bbox_h.max(40.0))
+            on:mousedown=|ev: MouseEvent| ev.stop_propagation()
+        >
+            <div style="padding:8px;font-size:12px;color:var(--text-muted);">
+                {format!("{} ({}×{:.0})", tpl_name, bbox_w as u32, bbox_h)}
+            </div>
+            <button class="header-btn" style="margin:8px;padding:4px 12px;font-size:12px;"
+                on:click=on_unpack
+                disabled=move || unpack_loading.get()
+            >
+                {move || if unpack_loading.get() { "Разворачиваю..." } else { "Развернуть" }}
+            </button>
+        </div>
     }.into_view()
 }

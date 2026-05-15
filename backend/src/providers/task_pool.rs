@@ -200,7 +200,8 @@ async fn process_node(
         | ProcessNodeKind::SubgraphOutput | ProcessNodeKind::Reduce
         | ProcessNodeKind::AssBuilder | ProcessNodeKind::SubtitlePiece
         | ProcessNodeKind::Overlay | ProcessNodeKind::SubtitleTrack
-        | ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => ("json", "application/json"),
+        | ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput
+        | ProcessNodeKind::Template => ("json", "application/json"),
         ProcessNodeKind::Mux => ("mp4", "video/mp4"),
         ProcessNodeKind::RemoveBackground | ProcessNodeKind::ResizeImage
         | ProcessNodeKind::AddBorder => ("png", "image/png"),
@@ -367,7 +368,7 @@ async fn process_node(
         ProcessNodeKind::Clip => {
             let (trim_start, trim_end, time_in, time_out, preview_width, keyframes) = match &node.settings {
                 Some(api_types::NodeSettings::Clip {
-                    trim_start_ms, trim_end_ms, time_in, time_out, preview_width, keyframes
+                    trim_start_ms, trim_end_ms, time_in, time_out, preview_width, keyframes,
                 }) => (*trim_start_ms, *trim_end_ms, *time_in, *time_out, *preview_width, keyframes.clone()),
                 _ => (0.0, 0.0, 0.0, 1.0, 320, Vec::new()),
             };
@@ -406,6 +407,22 @@ async fn process_node(
             times.sort_by(|a, b| a.partial_cmp(b).unwrap());
             times.dedup();
 
+            // Get media duration to ensure keyframes at 0 and end
+            let media_duration_ms = if let Some(media_path) = input_path_ref {
+                ffmpeg.probe(media_path).await.ok()
+                    .and_then(|p| p.duration_secs)
+                    .map(|d| d * 1000.0)
+                    .unwrap_or(0.0)
+            } else { 0.0 };
+
+            // Ensure t=0 and t=duration are in the times list
+            if !times.iter().any(|&t| t < 0.5) {
+                times.insert(0, 0.0);
+            }
+            if media_duration_ms > 0.0 && !times.iter().any(|&t| (t - media_duration_ms).abs() < 0.5) {
+                times.push(media_duration_ms);
+            }
+
             // Merge keyframes from settings with time points
             let merged_kfs: Vec<api_types::OverlayKeyframe> = if !times.is_empty() {
                 times.iter().map(|&t| {
@@ -413,7 +430,8 @@ async fn process_node(
                         .cloned()
                         .unwrap_or(api_types::OverlayKeyframe {
                             t_ms: t, x: 0.5, y: 0.5,
-                            scale: 1.0, alpha: 1.0, corner_radius: 0.0,
+                            scale: 1.0, alpha: 1.0, corner_radius: 0.0, border_width: 0.0,
+                            border_color: "#FFFFFF".to_string(),
                             interpolation: api_types::Interpolation::Linear,
                         })
                 }).collect()
@@ -442,6 +460,8 @@ async fn process_node(
             let mut scale_kf = Vec::new();
             let mut alpha_kf = Vec::new();
             let mut cr_kf = Vec::new();
+            let mut bw_kf = Vec::new();
+            let mut bc_kf = Vec::new();
 
             for kf in &merged_kfs {
                 let t_norm = ((kf.t_ms - start_ms) / duration_ms).clamp(0.0, 1.0);
@@ -452,6 +472,9 @@ async fn process_node(
                 scale_kf.push(entry(kf.scale));
                 alpha_kf.push(entry(kf.alpha));
                 cr_kf.push(entry(kf.corner_radius));
+                bw_kf.push(entry(kf.border_width));
+                let rgb = parse_hex_color(&kf.border_color);
+                bc_kf.push(serde_json::json!({"t": t_norm, "r": rgb[0], "g": rgb[1], "b": rgb[2], "interpolation": interp}));
             }
 
             if merged_kfs.is_empty() {
@@ -461,6 +484,8 @@ async fn process_node(
                 scale_kf.push(entry(1.0));
                 alpha_kf.push(entry(1.0));
                 cr_kf.push(entry(0.0));
+                bw_kf.push(entry(0.0));
+                bc_kf.push(serde_json::json!({"t": 0.0, "r": 255, "g": 255, "b": 255}));
             }
 
             let descriptor = serde_json::json!({
@@ -468,11 +493,13 @@ async fn process_node(
                 "y": y_kf,
                 "scale": scale_kf,
                 "corner_radius": cr_kf,
+                "border_width": bw_kf,
                 "alpha": alpha_kf,
                 "time_in_ms": start_ms,
                 "time_out_ms": end_ms,
                 "trim_start_ms": trim_start,
                 "trim_end_ms": trim_end,
+                "border_color": bc_kf,
             });
             tokio::fs::write(&output_path, serde_json::to_string_pretty(&descriptor).unwrap())
                 .await
@@ -745,7 +772,8 @@ async fn process_node(
                     .cloned()
                     .unwrap_or(api_types::OverlayKeyframe {
                         t_ms: t, x: 0.5, y: 0.5,
-                        scale: 1.0, alpha: 1.0, corner_radius: 0.0,
+                        scale: 1.0, alpha: 1.0, corner_radius: 0.0, border_width: 0.0,
+                        border_color: "#FFFFFF".to_string(),
                         interpolation: api_types::Interpolation::Linear,
                     })
             }).collect();
@@ -1045,6 +1073,10 @@ async fn process_node(
             tokio::fs::write(&output_path, serde_json::to_string_pretty(&json).unwrap())
                 .await.map_err(|e| e.to_string())?;
         }
+        ProcessNodeKind::Template => {
+            // Template nodes don't process — they are placeholders for unpack
+            return Err("Template nodes cannot be run. Use 'Unpack' to expand.".to_string());
+        }
         ProcessNodeKind::Mux => {
             let (num_clips, fps) = match &node.settings {
                 Some(api_types::NodeSettings::Mux { num_clips, fps }) => (*num_clips, *fps),
@@ -1119,6 +1151,67 @@ async fn process_node(
                 return Err("No clips connected to Mux".to_string());
             }
 
+            // Pre-process clips that need corner_radius or border:
+            // decode → apply corners/border per frame in Rust → encode RGBA video
+            let assets_dir = storage.assets_dir(req.project_id);
+            let mut preprocessed_paths: Vec<Option<std::path::PathBuf>> = Vec::new();
+            let extract_spline_kfs = |desc: &serde_json::Value, prop: &str| -> Vec<(f64, f64, String)> {
+                desc.get(prop)
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter()
+                        .filter_map(|kf| {
+                            let t = kf.get("t").and_then(|v| v.as_f64())?;
+                            let v = kf.get("value").and_then(|v| v.as_f64())?;
+                            let interp = kf.get("interpolation").and_then(|v| v.as_str()).unwrap_or("Linear").to_string();
+                            Some((t, v, interp))
+                        })
+                        .collect())
+                    .unwrap_or_else(|| vec![(0.0, 0.0, "Linear".to_string()), (1.0, 0.0, "Linear".to_string())])
+            };
+            let max_spline_val = |kfs: &[(f64, f64, String)]| -> f64 {
+                kfs.iter().map(|(_, v, _)| *v).fold(0.0_f64, f64::max)
+            };
+
+            for (i, clip) in clips.iter().enumerate() {
+                let radius_kfs = extract_spline_kfs(&clip.descriptor, "corner_radius");
+                let border_kfs = extract_spline_kfs(&clip.descriptor, "border_width");
+                let max_cr = max_spline_val(&radius_kfs);
+                let max_bw = max_spline_val(&border_kfs);
+
+                // Extract border color keyframes as (t, [r,g,b])
+                let bc_kfs: Vec<(f64, [u8; 3], String)> = clip.descriptor.get("border_color")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|kf| {
+                        let t = kf.get("t").and_then(|v| v.as_f64())?;
+                        let r = kf.get("r").and_then(|v| v.as_u64())? as u8;
+                        let g = kf.get("g").and_then(|v| v.as_u64())? as u8;
+                        let b = kf.get("b").and_then(|v| v.as_u64())? as u8;
+                        let interp = kf.get("interpolation").and_then(|v| v.as_str()).unwrap_or("Linear").to_string();
+                        Some((t, [r, g, b], interp))
+                    }).collect())
+                    .unwrap_or_else(|| vec![(0.0, [255, 255, 255], "Linear".to_string())]);
+
+                if max_cr > 0.5 || max_bw > 0.5 {
+                    let (clip_time_in, clip_time_out) = if let Some(ms) = clip.descriptor.get("time_in_ms").and_then(|v| v.as_f64()) {
+                        let ms_out = clip.descriptor["time_out_ms"].as_f64().unwrap_or(ms);
+                        (ms / 1000.0, ms_out / 1000.0)
+                    } else {
+                        (0.0, duration_s)
+                    };
+                    let clip_dur = (clip_time_out - clip_time_in).max(0.01);
+                    let trim_start = clip.descriptor["trim_start_ms"].as_f64().unwrap_or(0.0) / 1000.0;
+
+                    let pp_path = assets_dir.join(format!("{}.pp_{i}.mkv", req.node_id));
+                    crate::providers::compositor::preprocess_clip_with_border(
+                        &ffmpeg, &clip.media_path, &pp_path, fps, clip_dur,
+                        &radius_kfs, &border_kfs, &bc_kfs, trim_start,
+                    ).await.map_err(|e| format!("Clip pre-processing failed for clip {i}: {e}"))?;
+                    preprocessed_paths.push(Some(pp_path));
+                } else {
+                    preprocessed_paths.push(None);
+                }
+            }
+
             // Build a single ffmpeg command with expression-based overlays
             let mut cmd = tokio::process::Command::new(ffmpeg.binary());
             cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
@@ -1130,9 +1223,13 @@ async fn process_node(
                     width, height, fps, duration_s
                 ));
 
-            // Add each clip as an input, with time offset for images
-            for clip in &clips {
-                if clip.is_image {
+            // Add each clip as an input
+            // If preprocessed (has corners/border baked in), use preprocessed file (trim already applied)
+            for (i, clip) in clips.iter().enumerate() {
+                if let Some(ref pp_path) = preprocessed_paths[i] {
+                    // Preprocessed: trim already applied, RGBA with transparent corners
+                    cmd.arg("-i").arg(pp_path);
+                } else if clip.is_image {
                     let time_in_s = clip.descriptor.get("time_in_ms")
                         .and_then(|v| v.as_f64()).map(|ms| ms / 1000.0)
                         .unwrap_or_else(|| clip.descriptor["time_in"].as_f64().unwrap_or(0.0) * duration_s);
@@ -1170,10 +1267,10 @@ async fn process_node(
                     &clip.descriptor, "scale", 1.0, time_in_s, clip_dur, samples_per_seg
                 );
                 let x_expr = build_ffmpeg_pos_expr(
-                    &clip.descriptor, "x", 0.5, time_in_s, clip_dur, samples_per_seg, width as f64
+                    &clip.descriptor, "x", 0.5, time_in_s, clip_dur, samples_per_seg, width as f64, "x"
                 );
                 let y_expr = build_ffmpeg_pos_expr(
-                    &clip.descriptor, "y", 0.5, time_in_s, clip_dur, samples_per_seg, height as f64
+                    &clip.descriptor, "y", 0.5, time_in_s, clip_dur, samples_per_seg, height as f64, "y"
                 );
 
                 // Alpha (midpoint — ffmpeg colorchannelmixer doesn't support expressions)
@@ -1187,32 +1284,28 @@ async fn process_node(
                     format!("[ovr{i}]")
                 };
 
-                // Scale: for video clips — fit to canvas; for images — fraction of canvas width
+                // Scale: animated for both video and image clips
+                // For images: fraction of canvas width
+                // For video: fraction of canvas (scale=1 → fill canvas)
                 let scale_part = if clip.is_image {
                     format!(
                         "scale=w='trunc({cw}*({scale_expr})/2)*2':h='-2':flags=lanczos:eval=frame",
                         cw = width, scale_expr = scale_expr,
                     )
                 } else {
-                    // Video: fit to canvas size
                     format!(
-                        "scale={}:{}:flags=lanczos",
-                        width, height,
+                        "scale=w='trunc({cw}*({scale_expr})/2)*2':h='trunc({ch}*({scale_expr})/2)*2':flags=lanczos:eval=frame",
+                        cw = width, ch = height, scale_expr = scale_expr,
                     )
                 };
                 filter.push_str(&format!(
-                    "[{input_idx}:v]{scale_part},format=rgba,colorchannelmixer=aa={alpha_mid:.3}[clip{i}];",
+                    "[{input_idx}:v]{scale_part},format=rgba,colorchannelmixer=aa={alpha_mid:.3}[clip{i}_raw];",
                 ));
-                // Overlay: video clips fill canvas (0:0), image clips use animated position
-                if clip.is_image {
-                    filter.push_str(&format!(
-                        "{prev_label}[clip{i}]overlay=x='{x_expr}':y='{y_expr}':enable='{enable}':format=auto:eval=frame{out_label};",
-                    ));
-                } else {
-                    filter.push_str(&format!(
-                        "{prev_label}[clip{i}]overlay=0:0:enable='{enable}':format=auto{out_label};",
-                    ));
-                }
+
+                // Overlay clip (preprocessed clips already have RGBA with transparent corners)
+                filter.push_str(&format!(
+                    "{prev_label}[clip{i}_raw]overlay=x='{x_expr}':y='{y_expr}':enable='{enable}':format=auto:eval=frame{out_label};",
+                ));
                 prev_label = out_label;
             }
 
@@ -1252,6 +1345,7 @@ async fn process_node(
                 .find(|(_, c)| !c.is_image)
                 .map(|(i, _)| i + 1); // +1 because input 0 is color=black
 
+            tracing::debug!("Mux filter_complex:\n{}", filter);
             cmd.arg("-filter_complex").arg(&filter)
                 .arg("-map").arg(map_label);
             if let Some(ai) = audio_input {
@@ -1437,6 +1531,7 @@ fn build_ffmpeg_raw_spline_expr(
 }
 
 /// Build piecewise linear ffmpeg expression for position (0-1 → pixels, centered on overlay).
+/// `axis` = "x" or "y" — determines whether to subtract overlay_w/2 or overlay_h/2.
 fn build_ffmpeg_pos_expr(
     descriptor: &serde_json::Value,
     prop: &str,
@@ -1445,16 +1540,18 @@ fn build_ffmpeg_pos_expr(
     clip_dur: f64,
     samples_per_segment: usize,
     dimension: f64,
+    axis: &str,
 ) -> String {
+    let overlay_half = if axis == "y" { "overlay_h/2" } else { "overlay_w/2" };
     if clip_dur <= 0.0 {
         let v = eval_property(descriptor, prop, 0.0, default);
-        return format!("{:.1}-overlay_w/2", v * dimension);
+        return format!("{:.1}-{}", v * dimension, overlay_half);
     }
     let samples = build_sample_times(descriptor, time_in_s, clip_dur, samples_per_segment);
     let points: Vec<(f64, f64)> = samples.iter()
         .map(|(abs_t, local_t)| (*abs_t, eval_property(descriptor, prop, *local_t, default) * dimension))
         .collect();
-    format!("{}-overlay_w/2", build_piecewise_linear(&points))
+    format!("{}-{}", build_piecewise_linear(&points), overlay_half)
 }
 
 /// Build nested if(lt(t,...), lerp, ...) expression from sampled points.
@@ -1492,6 +1589,18 @@ fn build_piecewise_linear(points: &[(f64, f64)]) -> String {
         expr.push(')');
     }
     expr
+}
+
+fn parse_hex_color(s: &str) -> [u8; 3] {
+    let s = s.trim_start_matches('#');
+    if s.len() >= 6 {
+        let r = u8::from_str_radix(&s[0..2], 16).unwrap_or(255);
+        let g = u8::from_str_radix(&s[2..4], 16).unwrap_or(255);
+        let b = u8::from_str_radix(&s[4..6], 16).unwrap_or(255);
+        [r, g, b]
+    } else {
+        [255, 255, 255]
+    }
 }
 
 /// Read raw JSON string from an upstream node's output file via port name.

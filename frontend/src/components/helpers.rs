@@ -76,6 +76,7 @@ pub fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Process(ProcessNodeKind::SubtitleTrack) => "Дорожка СТ",
         NodeKind::Process(ProcessNodeKind::NamedInput) => "Вход →",
         NodeKind::Process(ProcessNodeKind::NamedOutput) => "→ Выход",
+        NodeKind::Process(ProcessNodeKind::Template) => "Шаблон",
         NodeKind::Reference { .. } => "&",
     }
 }

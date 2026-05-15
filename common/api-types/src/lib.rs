@@ -6,6 +6,7 @@ pub const CONTENT_TYPE: &str = "application/x-postcard";
 
 fn default_one() -> f64 { 1.0 }
 fn default_preview_width() -> u32 { 320 }
+fn default_border_color() -> String { "#FFFFFF".to_string() }
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(value)
@@ -55,6 +56,7 @@ pub enum ProcessNodeKind {
     SubtitleTrack,
     NamedInput,
     NamedOutput,
+    Template,
 }
 
 
@@ -143,6 +145,7 @@ impl ProcessNodeKind {
             ProcessNodeKind::SubtitleTrack => "subtitle-track",
             ProcessNodeKind::NamedInput => "named-input",
             ProcessNodeKind::NamedOutput => "named-output",
+            ProcessNodeKind::Template => "template",
         }
     }
 
@@ -175,6 +178,7 @@ impl ProcessNodeKind {
             "subtitle-track" => Some(ProcessNodeKind::SubtitleTrack),
             "named-input" => Some(ProcessNodeKind::NamedInput),
             "named-output" => Some(ProcessNodeKind::NamedOutput),
+            "template" => Some(ProcessNodeKind::Template),
             _ => None,
         }
     }
@@ -204,6 +208,7 @@ impl ProcessNodeKind {
             | ProcessNodeKind::AddBorder => PortType::Image,
             ProcessNodeKind::SubtitleTrack => PortType::SubtitleSegments,
             ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => PortType::Number,
+            ProcessNodeKind::Template => PortType::Number,
         }
     }
 
@@ -232,6 +237,7 @@ impl ProcessNodeKind {
             | ProcessNodeKind::AddBorder => PortType::Image,
             ProcessNodeKind::SubtitleTrack => PortType::AssSubtitles,
             ProcessNodeKind::NamedInput | ProcessNodeKind::NamedOutput => PortType::Number,
+            ProcessNodeKind::Template => PortType::Number,
         }
     }
 
@@ -305,6 +311,15 @@ pub enum NodeSettings {
     },
     NamedInput { name: String },
     NamedOutput { names: Vec<String> },
+    Template {
+        template_name: String,
+        #[serde(default)]
+        bbox_w: f32,
+        #[serde(default)]
+        bbox_h: f32,
+        #[serde(default)]
+        inputs: Vec<TemplatePort>,
+    },
 }
 
 fn default_res() -> u32 { 1920 }
@@ -331,6 +346,10 @@ pub struct OverlayKeyframe {
     pub alpha: f64,
     #[serde(default)]
     pub corner_radius: f64,
+    #[serde(default)]
+    pub border_width: f64,
+    #[serde(default = "default_border_color")]
+    pub border_color: String,
     #[serde(default)]
     pub interpolation: Interpolation,
 }
@@ -466,6 +485,7 @@ impl NodeSettings {
             ProcessNodeKind::AddBorder => NodeSettings::AddBorder { color: "#FFFFFF".to_string(), border_width: 5 },
             ProcessNodeKind::NamedInput => NodeSettings::NamedInput { name: "default".to_string() },
             ProcessNodeKind::NamedOutput => NodeSettings::NamedOutput { names: Vec::new() },
+            ProcessNodeKind::Template => NodeSettings::Template { template_name: String::new(), bbox_w: 0.0, bbox_h: 0.0, inputs: Vec::new() },
             ProcessNodeKind::SubtitleTrack => NodeSettings::SubtitleTrack {
                 styles: vec![SubtitleStyle::default()],
                 segments: Vec::new(),
@@ -511,6 +531,9 @@ impl NodeSettings {
                     h = h.wrapping_mul(31).wrapping_add(kf.y.to_bits());
                     h = h.wrapping_mul(31).wrapping_add(kf.scale.to_bits());
                     h = h.wrapping_mul(31).wrapping_add(kf.alpha.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.corner_radius.to_bits());
+                    h = h.wrapping_mul(31).wrapping_add(kf.border_width.to_bits());
+                    for b in kf.border_color.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
                 }
                 format!("clip:s={trim_start_ms}:e={trim_end_ms}:in={time_in}:out={time_out}:pw={preview_width}:kf={h:x}")
             }
@@ -574,12 +597,13 @@ impl NodeSettings {
             }
             NodeSettings::NamedInput { name } => format!("named-input:{name}"),
             NodeSettings::NamedOutput { names } => format!("named-output:{}", names.join(",")),
+            NodeSettings::Template { template_name, .. } => format!("template:{template_name}"),
         }
     }
 }
 
 /// Describes the semantic type of a node's output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PortType {
     Number,
     Video,
@@ -778,6 +802,7 @@ impl ProcessNodeKind {
                 PortDef { name: String::new(), kind: PortType::Number },
             ],
             ProcessNodeKind::NamedOutput => vec![], // dynamic, based on settings
+            ProcessNodeKind::Template => vec![], // dynamic, from template file
         }
     }
 
@@ -823,6 +848,13 @@ impl ProcessNodeKind {
     pub fn input_ports_with_settings(&self, settings: Option<&NodeSettings>) -> Vec<PortDef> {
         match self {
             ProcessNodeKind::Scalar | ProcessNodeKind::Spline | ProcessNodeKind::NamedOutput => vec![],
+            ProcessNodeKind::Template => {
+                if let Some(NodeSettings::Template { inputs, .. }) = settings {
+                    inputs.iter().map(|p| PortDef { name: p.port_name.clone(), kind: p.port_kind }).collect()
+                } else {
+                    vec![]
+                }
+            }
             ProcessNodeKind::TrimAudio => vec![
                 PortDef { name: "audio".into(), kind: NodeOutputKind::Audio },
                 PortDef { name: "start".into(), kind: PortType::Number },
@@ -849,7 +881,7 @@ impl ProcessNodeKind {
                 PortDef { name: "subtitles".into(), kind: PortType::AssSubtitles },
             ],
             ProcessNodeKind::SubtitlePiece => vec![
-                PortDef { name: "subtitles".into(), kind: PortType::AssSubtitles },
+                PortDef { name: "subtitles".into(), kind: PortType::SubtitleSegments },
             ],
             ProcessNodeKind::Overlay => vec![
                 PortDef { name: "image".into(), kind: NodeOutputKind::Image },
@@ -1134,6 +1166,84 @@ pub struct UploadFinalizeInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadFinalizeOutput {
     pub node: Node,
+}
+
+// ─── Templates ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeTemplate {
+    pub name: String,
+    pub nodes: Vec<TemplateNode>,
+    pub edges: Vec<Edge>,
+    /// Input ports: edges that crossed the selection boundary (external → internal).
+    /// Each entry: (internal_node_id, port_name, port_kind)
+    #[serde(default)]
+    pub inputs: Vec<TemplatePort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateNode {
+    pub id: Uuid,
+    pub kind: NodeKind,
+    #[serde(default)]
+    pub settings: Option<NodeSettings>,
+    pub relative_position: Position,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplatePort {
+    /// Display name for this input on the template node
+    pub port_name: String,
+    pub port_kind: PortType,
+    /// Internal targets: when connected, fan-out to all these (node_id, port_name) pairs
+    pub targets: Vec<TemplatePortTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplatePortTarget {
+    pub node_id: Uuid,
+    pub port_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveTemplateInput {
+    pub project_id: Uuid,
+    pub name: String,
+    pub node_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveTemplateOutput {
+    pub template: NodeTemplate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListTemplatesOutput {
+    pub templates: Vec<NodeTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnpackTemplateInput {
+    pub project_id: Uuid,
+    pub template_name: String,
+    pub position: Position,
+    #[serde(default)]
+    pub parent_map_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnpackTemplateOutput {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    /// Old template node ID → new node ID mapping (for rewiring external connections)
+    pub id_map: std::collections::HashMap<Uuid, Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteTemplateInput {
+    pub name: String,
 }
 
 // ─── API envelope ───

@@ -179,3 +179,37 @@ pub async fn update_node_settings(
 pub async fn get_task_status(task_id: Uuid) -> Result<TaskStatusOutput, ApiClientError> {
     post("/api/nodes/task-status", &TaskStatusInput { task_id }).await
 }
+
+pub async fn save_template(
+    project_id: Uuid,
+    name: String,
+    node_ids: Vec<Uuid>,
+    parent_map_id: Option<Uuid>,
+) -> Result<api_types::SaveTemplateOutput, ApiClientError> {
+    post(
+        "/api/templates/save",
+        &api_types::SaveTemplateInput { project_id, name, node_ids, parent_map_id },
+    )
+    .await
+}
+
+pub async fn list_templates() -> Result<api_types::ListTemplatesOutput, ApiClientError> {
+    post("/api/templates/list", &()).await
+}
+
+pub async fn unpack_template(
+    project_id: Uuid,
+    template_name: String,
+    position: api_types::Position,
+    parent_map_id: Option<Uuid>,
+) -> Result<api_types::UnpackTemplateOutput, ApiClientError> {
+    post(
+        "/api/templates/unpack",
+        &api_types::UnpackTemplateInput { project_id, template_name, position, parent_map_id },
+    )
+    .await
+}
+
+pub async fn delete_template(name: String) -> Result<(), ApiClientError> {
+    post::<_, ()>("/api/templates/delete", &api_types::DeleteTemplateInput { name }).await
+}

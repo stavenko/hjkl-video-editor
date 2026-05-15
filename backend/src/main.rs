@@ -8,7 +8,7 @@ use clap::Parser;
 use backend::api;
 use backend::api::endpoints::config_frontend::FrontendConfigPath;
 use backend::config::Config;
-use backend::providers::{Ffmpeg, ProjectStorage, TaskPool, UploadManager, WhisperProvider};
+use backend::providers::{Ffmpeg, ProjectStorage, TemplateStorage, TaskPool, UploadManager, WhisperProvider};
 
 #[derive(Parser, Debug)]
 #[command(name = "backend")]
@@ -59,6 +59,8 @@ async fn run_server(config_path: PathBuf) -> std::io::Result<()> {
     );
     let task_pool = Arc::new(TaskPool::new(project_storage.clone(), ffmpeg.clone(), whisper));
 
+    let template_storage = Arc::new(TemplateStorage::new(config.storage.templates_root.clone()));
+
     let frontend_config_path = FrontendConfigPath(config.frontend.config_path.clone());
     let frontend_config_path_data = web::Data::new(frontend_config_path);
     let upload_manager_data = web::Data::new(UploadManager::new());
@@ -82,6 +84,7 @@ async fn run_server(config_path: PathBuf) -> std::io::Result<()> {
             .app_data(upload_manager_data.clone())
             .app_data(ffmpeg_data.clone())
             .app_data(web::Data::new(task_pool.clone()))
+            .app_data(web::Data::new(template_storage.clone()))
             .configure(api::configure_routes)
     })
     .bind((bind_addr.as_str(), bind_port))?

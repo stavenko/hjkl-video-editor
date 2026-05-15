@@ -267,7 +267,13 @@ html, body {
     box-shadow: 0 6px 16px rgba(0,0,0,0.35);
     width: 240px;
 }
-.node.selected { border-color: var(--accent); }
+.node.selected { border: 2px solid var(--accent); box-shadow: 0 0 12px rgba(59,130,246,0.4); }
+.selection-rect {
+    position: absolute;
+    border: 1px dashed var(--accent);
+    background: rgba(59,130,246,0.08);
+    pointer-events: none;
+}
 .node.medium { width: 400px !important; min-width: 400px !important; }
 .node.medium.multi-outputs .node-body { margin-right: 130px; }
 .node.wide { width: 600px !important; min-width: 600px !important; }

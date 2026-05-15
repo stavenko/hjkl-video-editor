@@ -99,22 +99,21 @@ pub async fn handler(
                     let t = query.t.unwrap_or(0.0).clamp(0.0, 1.0);
                     if let Some(out) = node.output.as_ref() {
                         let video_path = storage.assets_dir(params.project_id).join(&out.file_name);
-                        if t > 0.0 {
-                            let dur = out.duration_ms.unwrap_or(1000.0) / 1000.0;
-                            let seek = t as f64 * dur;
-                            let width = query.w.unwrap_or(100).clamp(50, 1920);
-                            match ffmpeg.generate_frame_at_width(&video_path, seek, width).await {
-                                Ok(png) => return HttpResponse::Ok()
-                                    .content_type("image/png")
-                                    .body(png),
-                                Err(_) => {}
+                        let dur = out.duration_ms.unwrap_or(1000.0) / 1000.0;
+                        // Clamp seek to 0.1s before end — ffmpeg can't extract the very last frame
+                        let seek = (t as f64 * dur).min(dur - 0.1).max(0.0);
+                        let width = query.w.unwrap_or(100).clamp(50, 1920);
+                        match ffmpeg.generate_frame_at_width(&video_path, seek, width).await {
+                            Ok(png) if !png.is_empty() => return HttpResponse::Ok()
+                                .content_type("image/png")
+                                .body(png),
+                            Ok(_) => {
+                                tracing::error!("Frame extraction returned empty data at seek={:.3}s for {:?}", seek, video_path);
+                                return HttpResponse::InternalServerError().body("Frame extraction returned empty data");
                             }
-                        } else {
-                            match ffmpeg.generate_frame_at(&video_path, 0.0).await {
-                                Ok(png) => return HttpResponse::Ok()
-                                    .content_type("image/png")
-                                    .body(png),
-                                Err(_) => {}
+                            Err(e) => {
+                                tracing::error!("Frame extraction failed at seek={:.3}s for {:?}: {}", seek, video_path, e);
+                                return HttpResponse::InternalServerError().body(e.to_string());
                             }
                         }
                     }

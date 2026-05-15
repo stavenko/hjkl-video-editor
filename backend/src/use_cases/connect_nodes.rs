@@ -56,7 +56,9 @@ pub async fn command(
         return Err(Error::TargetNotProcessNode);
     };
 
-    let input_ports = process_kind.input_ports();
+    let to_node_settings = tg.nodes.iter().find(|n| n.id == input.to_node)
+        .and_then(|n| n.settings.as_ref());
+    let input_ports = process_kind.input_ports_with_settings(to_node_settings);
     let target_port = input_ports.iter().find(|p| p.name == input.to_port)
         .ok_or_else(|| Error::TypeMismatch(
             format!("No input port {:?} on {:?}", input.to_port, process_kind),

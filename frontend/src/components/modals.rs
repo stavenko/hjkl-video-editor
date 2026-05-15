@@ -1,17 +1,31 @@
-use api_types::{InputNodeKind, Node, NodeKind, ProcessNodeKind};
+use api_types::{InputNodeKind, Node, NodeKind, NodeTemplate, ProcessNodeKind};
 use leptos::*;
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
 use super::helpers::kind_label;
+use crate::services::project_service;
 
 #[component]
 pub fn AddNodeModal(
     on_select: impl Fn(NodeKind) + Copy + 'static,
     on_close: impl Fn() + Copy + 'static,
+    on_template: impl Fn(String) + Copy + 'static,
     inside_subgraph: Signal<bool>,
 ) -> impl IntoView {
     let active_tab = create_rw_signal(0u8);
+    let templates = create_rw_signal::<Vec<NodeTemplate>>(Vec::new());
+
+    // Load templates when tab 3 is selected
+    create_effect(move |_| {
+        if active_tab.get() == 3 {
+            spawn_local(async move {
+                if let Ok(out) = project_service::list_templates().await {
+                    templates.set(out.templates);
+                }
+            });
+        }
+    });
 
     view! {
         <div class="modal-backdrop" on:click=move |_| on_close()>
@@ -33,6 +47,10 @@ pub fn AddNodeModal(
                         class:active=move || active_tab.get() == 2
                         on:click=move |_| active_tab.set(2)
                     >"Композиция"</button>
+                    <button
+                        class:active=move || active_tab.get() == 3
+                        on:click=move |_| active_tab.set(3)
+                    >"Шаблоны"</button>
                 </div>
                 <div class="modal-body">
                     <Show when=move || active_tab.get() == 0>
@@ -171,6 +189,30 @@ pub fn AddNodeModal(
                                 <div class="node-type-icon">"💬"</div>
                                 <div class="node-type-label">"Дорожка СТ"</div>
                             </button>
+                        </div>
+                    </Show>
+                    <Show when=move || active_tab.get() == 3>
+                        <div class="node-type-grid">
+                            {move || {
+                                let tpls = templates.get();
+                                if tpls.is_empty() {
+                                    view! { <div style="padding:16px;color:var(--text-muted);">"Нет шаблонов"</div> }.into_view()
+                                } else {
+                                    tpls.into_iter().map(|t| {
+                                        let name = t.name.clone();
+                                        let name2 = name.clone();
+                                        let n_nodes = t.nodes.len();
+                                        let n_inputs = t.inputs.len();
+                                        view! {
+                                            <button class="node-type-card" on:click=move |_| on_template(name.clone())>
+                                                <div class="node-type-icon">"📋"</div>
+                                                <div class="node-type-label">{name2}</div>
+                                                <div style="font-size:10px;color:var(--text-muted);">{format!("{} нод, {} входов", n_nodes, n_inputs)}</div>
+                                            </button>
+                                        }
+                                    }).collect_view()
+                                }
+                            }}
                         </div>
                     </Show>
                 </div>

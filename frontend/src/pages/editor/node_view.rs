@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use api_types::{Edge, InputNodeKind, Node, NodeKind, Position, ProcessNodeKind, TaskStatus};
 use leptos::*;
 use uuid::Uuid;
@@ -21,6 +23,7 @@ pub fn NodeView(
     connecting_from_port: RwSignal<String>,
     player_src: RwSignal<Option<String>>,
     json_modal: RwSignal<Option<(String, &'static str)>>,
+    selected_nodes: RwSignal<HashSet<Uuid>>,
     on_drag_start: impl Fn(Uuid, MouseEvent) + Copy + 'static,
     on_delete: impl Fn(Uuid) + Copy + 'static,
     on_connect_complete: impl Fn(Uuid, String, Uuid, String) + Copy + 'static,
@@ -40,6 +43,17 @@ pub fn NodeView(
     let active_task_id = create_rw_signal::<Option<Uuid>>(None);
 
     let nid = node_signal.with_untracked(|n| n.id);
+
+    // Sync position from parent nodes signal (for bulk position updates)
+    create_effect(move |_| {
+        let all = nodes.get();
+        if let Some(updated) = all.iter().find(|n| n.id == nid) {
+            let cur = node_signal.get_untracked();
+            if cur.position.x != updated.position.x || cur.position.y != updated.position.y {
+                node_signal.update(|n| n.position = updated.position);
+            }
+        }
+    });
     create_effect(move |_| {
         let dp = drag_pos.get();
         match dp {
@@ -132,6 +146,9 @@ pub fn NodeView(
                     NodeKind::Process(ProcessNodeKind::NamedOutput) => cls.push_str(" medium"),
                     _ => {}
                 }
+                if selected_nodes.get().contains(&id_for_drag) {
+                    cls.push_str(" selected");
+                }
                 cls
             }
             style=move || {
@@ -140,7 +157,17 @@ pub fn NodeView(
                     .filter(|(id, _)| *id == id_for_drag)
                     .map(|(_, p)| p)
                     .unwrap_or(node_signal.get().position);
-                format!("left: {}px; top: {}px;", pos.x, pos.y)
+                let mut style = format!("left: {}px; top: {}px;", pos.x, pos.y);
+                // Template node: custom size from bbox
+                if let Some(api_types::NodeSettings::Template { bbox_w, bbox_h, .. }) = &node_signal.get_untracked().settings {
+                    if *bbox_w > 0.0 {
+                        style.push_str(&format!(" width: {}px; min-width: {}px;", bbox_w, bbox_w));
+                    }
+                    if *bbox_h > 40.0 {
+                        style.push_str(&format!(" min-height: {}px;", bbox_h));
+                    }
+                }
+                style
             }
         >
             {is_process.then(move || {
@@ -199,7 +226,19 @@ pub fn NodeView(
                 class="node-header"
                 on:mousedown=move |ev: MouseEvent| {
                     ev.prevent_default();
-                    on_drag_start(id_for_drag, ev);
+                    ev.stop_propagation(); // prevent canvas selection rect
+                    if ev.shift_key() {
+                        // Toggle selection
+                        selected_nodes.update(|sel| {
+                            if sel.contains(&id_for_drag) {
+                                sel.remove(&id_for_drag);
+                            } else {
+                                sel.insert(id_for_drag);
+                            }
+                        });
+                    } else {
+                        on_drag_start(id_for_drag, ev);
+                    }
                 }
             >
                 <span class="node-kind-badge">{move || {
@@ -380,6 +419,9 @@ pub fn NodeView(
                         }
                         NodeKind::Process(ProcessNodeKind::Spline) => {
                             nodes::basic::spline_body(node_signal, project_id).into_view()
+                        }
+                        NodeKind::Process(ProcessNodeKind::Template) => {
+                            nodes::basic::template_body(node_signal, project_id, id_for_drag, nodes, edges, on_delete).into_view()
                         }
                         NodeKind::Process(pk) => {
                             nodes::basic::generic_process_body(node_signal, project_id, id_for_drag, pk, missing_ports, on_run, json_modal, on_create_phrase_selector, on_upload_error).into_view()

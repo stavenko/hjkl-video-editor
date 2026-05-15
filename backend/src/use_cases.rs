@@ -14,3 +14,7 @@ pub mod update_node_position;
 pub mod update_node_settings;
 pub mod upload_begin;
 pub mod upload_finalize;
+pub mod save_template;
+pub mod list_templates;
+pub mod unpack_template;
+pub mod delete_template;
